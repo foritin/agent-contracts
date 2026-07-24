@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>IPC 传输层 · agent-core</title>
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-core</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Core</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
+  <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="ipc-传输层">IPC 传输层</h1>
+<h2 id="1-概述">1. 概述</h2>
+<p>Unix Socket（macOS/Linux）和 Named Pipe（Windows）的 JSON-RPC 2.0 传输实现。<br>用于 Charter Main ↔ Agent Worker 的进程间通信。</p>
+<h2 id="2-协议定义">2. 协议定义</h2>
+<div class="code-block"><span class="code-block__lang">jsonc</span><button class="copy-code" type="button">复制</button><pre><code class="language-jsonc">// 请求
+{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;id&quot;: &quot;req-1&quot;,
+  &quot;method&quot;: &quot;tool.execute&quot;,
+  &quot;params&quot;: { &quot;name&quot;: &quot;read_file&quot;, &quot;input&quot;: { &quot;path&quot;: &quot;/foo.txt&quot; } }
+}
+
+// 响应
+{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;id&quot;: &quot;req-1&quot;,
+  &quot;result&quot;: { &quot;content&quot;: &quot;Hello World&quot; }
+}
+
+// 错误
+{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;id&quot;: &quot;req-1&quot;,
+  &quot;error&quot;: { &quot;code&quot;: -32603, &quot;message&quot;: &quot;tool not found&quot; }
+}
+
+// 事件（无 id）
+{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;method&quot;: &quot;agent.event&quot;,
+  &quot;params&quot;: { &quot;type&quot;: &quot;message&quot;, &quot;text&quot;: &quot;Hello&quot; }
+}</code></pre></div>
+<h2 id="3-传输帧格式">3. 传输帧格式</h2>
+<div class="code-block"><span class="code-block__lang">text</span><button class="copy-code" type="button">复制</button><pre><code class="language-text">[4 bytes: payload length (big-endian u32)][N bytes: JSON payload]</code></pre></div>
+<h2 id="4-服务端实现">4. 服务端实现</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-ipc/src/server.rs
+
+pub struct IpcServer {
+    listener: UnixListener,
+    handlers: HashMap&lt;String, Box&lt;dyn IpcHandler&gt;&gt;,
+}
+
+#[async_trait]
+trait IpcHandler: Send + Sync {
+    async fn handle(&amp;self, params: Value) -&gt; Result&lt;Value&gt;;
+}
+
+impl IpcServer {
+    pub fn new(socket_path: PathBuf) -&gt; Result&lt;Self&gt; {
+        // 清理旧 socket
+        if socket_path.exists() {
+            std::fs::remove_file(&amp;socket_path)?;
+        }
+        
+        let listener = UnixListener::bind(&amp;socket_path)?;
+        
+        // 设置权限（仅 owner）
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&amp;socket_path, Permissions::from_mode(0o600))?;
+        }
+        
+        Ok(Self {
+            listener,
+            handlers: HashMap::new(),
+        })
+    }
+    
+    pub fn register(&amp;mut self, method: &amp;str, handler: Box&lt;dyn IpcHandler&gt;) {
+        self.handlers.insert(method.to_string(), handler);
+    }
+    
+    pub async fn serve(&amp;self) -&gt; Result&lt;()&gt; {
+        loop {
+            let (mut stream, _addr) = self.listener.accept().await?;
+            
+            let handlers = self.handlers.clone();
+            tokio::spawn(async move {
+                if let Err(e) = Self::handle_connection(stream, handlers).await {
+                    tracing::error!(&quot;IPC connection error: {}&quot;, e);
+                }
+            });
+        }
+    }
+    
+    async fn handle_connection(
+        mut stream: UnixStream,
+        handlers: HashMap&lt;String, Box&lt;dyn IpcHandler&gt;&gt;,
+    ) -&gt; Result&lt;()&gt; {
+        loop {
+            // 读取帧头
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&amp;mut len_buf).await?;
+            let len = u32::from_be_bytes(len_buf) as usize;
+            
+            // 读取 payload
+            let mut buf = vec![0u8; len];
+            stream.read_exact(&amp;mut buf).await?;
+            
+            let request: JsonRpcRequest = serde_json::from_slice(&amp;buf)?;
+            
+            // 处理
+            let response = match handlers.get(&amp;request.method) {
+                Some(handler) =&gt; {
+                    match handler.handle(request.params.unwrap_or(Value::Null)).await {
+                        Ok(result) =&gt; JsonRpcResponse {
+                            jsonrpc: &quot;2.0&quot;.into(),
+                            id: request.id,
+                            result: Some(result),
+                            error: None,
+                        },
+                        Err(e) =&gt; JsonRpcResponse {
+                            jsonrpc: &quot;2.0&quot;.into(),
+                            id: request.id,
+                            result: None,
+                            error: Some(JsonRpcError {
+                                code: -32603,
+                                message: e.to_string(),
+                            }),
+                        },
+                    }
+                }
+                None =&gt; JsonRpcResponse {
+                    jsonrpc: &quot;2.0&quot;.into(),
+                    id: request.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32601,
+                        message: format!(&quot;method not found: {}&quot;, request.method),
+                    }),
+                },
+            };
+            
+            // 发送响应
+            let response_json = serde_json::to_vec(&amp;response)?;
+            let response_len = response_json.len() as u32;
+            stream.write_all(&amp;response_len.to_be_bytes()).await?;
+            stream.write_all(&amp;response_json).await?;
+        }
+    }
+}</code></pre></div>
+<h2 id="5-客户端实现">5. 客户端实现</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-ipc/src/client.rs
+
+pub struct IpcClient {
+    stream: UnixStream,
+    pending: Arc&lt;Mutex&lt;HashMap&lt;String, oneshot::Sender&lt;JsonRpcResponse&gt;&gt;&gt;&gt;,
+    next_id: Arc&lt;AtomicU64&gt;,
+}
+
+impl IpcClient {
+    pub async fn connect(socket_path: &amp;Path) -&gt; Result&lt;Self&gt; {
+        let stream = UnixStream::connect(socket_path).await?;
+        
+        let client = Self {
+            stream,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Arc::new(AtomicU64::new(1)),
+        };
+        
+        // 启动接收循环
+        client.start_recv_loop();
+        
+        Ok(client)
+    }
+    
+    pub async fn call(&amp;self, method: &amp;str, params: Value) -&gt; Result&lt;Value&gt; {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst).to_string();
+        let (tx, rx) = oneshot::channel();
+        
+        self.pending.lock().await.insert(id.clone(), tx);
+        
+        let request = JsonRpcRequest {
+            jsonrpc: &quot;2.0&quot;.into(),
+            id: Some(id),
+            method: method.to_string(),
+            params: Some(params),
+        };
+        
+        let json = serde_json::to_vec(&amp;request)?;
+        let len = json.len() as u32;
+        self.stream.write_all(&amp;len.to_be_bytes()).await?;
+        self.stream.write_all(&amp;json).await?;
+        
+        let response = rx.await.map_err(|_| Error::IpcTimeout)?;
+        
+        match response.error {
+            Some(e) =&gt; Err(Error::Ipc(e.message)),
+            None =&gt; Ok(response.result.unwrap_or(Value::Null)),
+        }
+    }
+    
+    fn start_recv_loop(&amp;self) {
+        let pending = self.pending.clone();
+        let mut stream = self.stream.try_clone().unwrap();
+        
+        tokio::spawn(async move {
+            loop {
+                // 读取并分发响应
+            }
+        });
+    }
+}</code></pre></div>
+<h2 id="6-windows-named-pipe">6. Windows Named Pipe</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">#[cfg(windows)]
+pub use windows::{IpcServerNamedPipe, IpcClientNamedPipe};
+
+#[cfg(windows)]
+mod windows {
+    use tokio::net::windows::named_pipe::{ServerOptions, ClientOptions};
+    
+    pub struct IpcServerNamedPipe {
+        pipe: tokio::net::windows::named_pipe::NamedPipeServer,
+    }
+    
+    impl IpcServerNamedPipe {
+        pub fn new(name: &amp;str) -&gt; Result&lt;Self&gt; {
+            let pipe = ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(name)?;
+            Ok(Self { pipe })
+        }
+    }
+}</code></pre></div></article><aside class="toc" aria-label="本页目录"></aside></main>
+  <footer class="doc-footer">本页为可离线浏览的重构规范；代码示例是实现合同，不是已交付源码。</footer>
+  <script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>会话管理 · agent-core</title>
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-core</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Core</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
+  <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="会话管理">会话管理</h1>
+<h2 id="1-概述">1. 概述</h2>
+<p>会话管理模块负责 Agent 对话会话的创建、持久化、恢复和归档。<br>使用 JSONL 格式存储，确保崩溃后可恢复。</p>
+<h2 id="2-数据模型">2. 数据模型</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-core/src/session.rs
+
+/// 会话元数据（JSONL 第一行）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMeta {
+    pub id: String,
+    pub created_at: DateTime&lt;Utc&gt;,
+    pub model: String,
+    pub provider: String,
+    pub title: Option&lt;String&gt;,
+}
+
+/// JSONL 中的每一行
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = &quot;snake_case&quot;)]
+pub enum SessionEvent {
+    Meta(SessionMeta),
+    Message(Message),
+    Usage(Usage),
+    ToolCall { name: String, input: Value },
+    ToolResult { call_id: String, output: Value },
+    System { event: String, data: Value },
+}
+
+/// 内存中的会话视图
+#[derive(Debug, Clone)]
+pub struct Session {
+    pub meta: SessionMeta,
+    pub messages: Vec&lt;Message&gt;,
+    pub total_input_tokens: u32,
+    pub total_output_tokens: u32,
+    pub total_tool_calls: u32,
+    pub status: SessionStatus,
+}
+
+pub enum SessionStatus {
+    Active,
+    Paused,
+    Completed,
+    Archived,
+    Error(String),
+}</code></pre></div>
+<h2 id="3-持久化层">3. 持久化层</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-store/src/session_store.rs
+
+pub struct SessionStore {
+    base_dir: PathBuf,
+}
+
+impl SessionStore {
+    pub fn new(base_dir: PathBuf) -&gt; Self {
+        Self { base_dir }
+    }
+    
+    /// 创建新会话
+    pub async fn create(&amp;self, model: &amp;str, provider: &amp;str) -&gt; Result&lt;Session&gt; {
+        let meta = SessionMeta::new(model, provider);
+        let path = self.session_path(&amp;meta.id);
+        
+        // 写入 meta 行
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&amp;path)?;
+        
+        let meta_line = serde_json::to_string(&amp;SessionEvent::Meta(meta.clone()))?;
+        writeln!(file, &quot;{}&quot;, meta_line)?;
+        
+        Ok(Session::new(meta))
+    }
+    
+    /// 追加事件到会话日志
+    pub async fn append(&amp;self, session_id: &amp;str, event: SessionEvent) -&gt; Result&lt;()&gt; {
+        let path = self.session_path(session_id);
+        let mut file = OpenOptions::new().append(true).open(&amp;path)?;
+        let line = serde_json::to_string(&amp;event)?;
+        writeln!(file, &quot;{}&quot;, line)?;
+        Ok(())
+    }
+    
+    /// 读取完整会话
+    pub async fn load(&amp;self, session_id: &amp;str) -&gt; Result&lt;Session&gt; {
+        let path = self.session_path(session_id);
+        let file = File::open(&amp;path)?;
+        let reader = BufReader::new(file);
+        
+        let mut meta = None;
+        let mut messages = Vec::new();
+        let mut usage = Usage::default();
+        
+        for line in reader.lines() {
+            let line = line?;
+            let event: SessionEvent = serde_json::from_str(&amp;line)?;
+            
+            match event {
+                SessionEvent::Meta(m) =&gt; meta = Some(m),
+                SessionEvent::Message(msg) =&gt; messages.push(msg),
+                SessionEvent::Usage(u) =&gt; usage += u,
+                _ =&gt; {}
+            }
+        }
+        
+        Ok(Session {
+            meta: meta.ok_or(Error::InvalidSession)?,
+            messages,
+            total_input_tokens: usage.input_tokens,
+            total_output_tokens: usage.output_tokens,
+        })
+    }
+    
+    /// 列出所有会话
+    pub async fn list(&amp;self) -&gt; Result&lt;Vec&lt;SessionMeta&gt;&gt; {
+        let mut sessions = Vec::new();
+        for entry in std::fs::read_dir(&amp;self.base_dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) == Some(&quot;jsonl&quot;) {
+                if let Ok(meta) = self.read_meta(&amp;path).await {
+                    sessions.push(meta);
+                }
+            }
+        }
+        sessions.sort_by(|a, b| b.created_at.cmp(&amp;a.created_at));
+        Ok(sessions)
+    }
+    
+    fn session_path(&amp;self, id: &amp;str) -&gt; PathBuf {
+        self.base_dir.join(format!(&quot;{}.jsonl&quot;, id))
+    }
+}</code></pre></div>
+<h2 id="4-崩溃恢复">4. 崩溃恢复</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">impl SessionStore {
+    /// 恢复中断的会话
+    pub async fn recover(&amp;self, session_id: &amp;str) -&gt; Result&lt;Session&gt; {
+        let mut session = self.load(session_id).await?;
+        
+        // 检查最后一行是否完整
+        let path = self.session_path(session_id);
+        let content = tokio::fs::read_to_string(&amp;path).await?;
+        
+        if content.ends_with(&#39;\n&#39;) {
+            // 完整，直接返回
+            Ok(session)
+        } else {
+            // 截断最后一行
+            let mut lines: Vec&lt;&amp;str&gt; = content.lines().collect();
+            lines.pop();  // 移除不完整的行
+            
+            let recovered = lines.join(&quot;\n&quot;) + &quot;\n&quot;;
+            tokio::fs::write(&amp;path, recovered).await?;
+            
+            // 重新加载
+            self.load(session_id).await
+        }
+    }
+}</code></pre></div>
+<h2 id="5-会话归档">5. 会话归档</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">impl SessionStore {
+    /// 归档会话（压缩 + 标记）
+    pub async fn archive(&amp;self, session_id: &amp;str) -&gt; Result&lt;()&gt; {
+        let path = self.session_path(session_id);
+        let archive_path = self.base_dir.join(format!(&quot;{}.jsonl.gz&quot;, session_id));
+        
+        // gzip 压缩
+        let input = File::open(&amp;path)?;
+        let output = File::create(&amp;archive_path)?;
+        let mut encoder = GzBuilder::new()
+            .write(output, Compression::default());
+        
+        io::copy(&amp;mut &amp;input, &amp;mut encoder)?;
+        encoder.finish()?;
+        
+        // 删除原文件
+        std::fs::remove_file(&amp;path)?;
+        
+        Ok(())
+    }
+}</code></pre></div>
+<h2 id="6-使用示例">6. 使用示例</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">use hermes_store::SessionStore;
+use hermes_core::{SessionEvent, Message};
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;()&gt; {
+    let store = SessionStore::new(PathBuf::from(&quot;./sessions&quot;));
+    
+    // 创建会话
+    let session = store.create(&quot;claude-sonnet-4&quot;, &quot;anthropic&quot;).await?;
+    println!(&quot;Created session: {}&quot;, session.meta.id);
+    
+    // 追加消息
+    store.append(&amp;session.meta.id, SessionEvent::Message(
+        Message::user_text(&quot;Hello!&quot;)
+    )).await?;
+    
+    // 加载会话
+    let loaded = store.load(&amp;session.meta.id).await?;
+    println!(&quot;Messages: {}&quot;, loaded.messages.len());
+    
+    Ok(())
+}</code></pre></div></article><aside class="toc" aria-label="本页目录"></aside></main>
+  <footer class="doc-footer">本页为可离线浏览的重构规范；代码示例是实现合同，不是已交付源码。</footer>
+  <script src="assets/site.js"></script>
+</body>
+</html>

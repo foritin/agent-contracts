@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>LLM Provider 抽象 · agent-core</title>
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-core</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Core</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
+  <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="llm-provider-抽象">LLM Provider 抽象</h1>
+<h2 id="1-概述">1. 概述</h2>
+<p>定义统一的 LLM Provider trait，支持多模型后端（Anthropic Claude、DeepSeek、OpenAI 兼容 API）。</p>
+<h2 id="2-trait-定义">2. Trait 定义</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-core/src/provider.rs
+
+#[async_trait]
+pub trait LlmProvider: Send + Sync {
+    async fn complete(
+        &amp;self,
+        request: CompletionRequest,
+    ) -&gt; Result&lt;CompletionResponse&gt;;
+    
+    async fn stream(
+        &amp;self,
+        request: CompletionRequest,
+    ) -&gt; Result&lt;BoxStream&lt;&#39;static, StreamEvent&gt;&gt;;
+    
+    fn capabilities(&amp;self) -&gt; Capabilities;
+    fn name(&amp;self) -&gt; &amp;str;
+}</code></pre></div>
+<h2 id="3-请求-响应类型">3. 请求/响应类型</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">pub struct CompletionRequest {
+    pub model: String,
+    pub system: Option&lt;String&gt;,
+    pub messages: Vec&lt;Message&gt;,
+    pub tools: Vec&lt;ToolSpec&gt;,
+    pub max_tokens: u32,
+    pub temperature: Option&lt;f32&gt;,
+    pub enable_caching: bool,
+}
+
+pub struct CompletionResponse {
+    pub content: Vec&lt;ContentBlock&gt;,
+    pub stop_reason: StopReason,
+    pub usage: Usage,
+}
+
+pub enum StreamEvent {
+    TextDelta { text: String },
+    ToolUseStart { id: String, name: String },
+    ToolUseDelta { id: String, input_json: String },
+    ToolUseComplete { id: String, input: Value },
+    Stop { reason: StopReason },
+    Usage(Usage),
+}
+
+pub enum StopReason {
+    EndTurn,
+    ToolUse,
+    MaxTokens,
+    StopSequence,
+    Other(String),
+}
+
+pub struct Usage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_read_tokens: Option&lt;u32&gt;,
+    pub cache_write_tokens: Option&lt;u32&gt;,
+}</code></pre></div>
+<h2 id="4-provider-实现">4. Provider 实现</h2>
+<h3 id="4-1-anthropic-provider">4.1 Anthropic Provider</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-llm/src/anthropic.rs
+
+pub struct AnthropicProvider {
+    client: reqwest::Client,
+    api_key: String,
+    base_url: String,
+    model: String,
+}
+
+#[async_trait]
+impl LlmProvider for AnthropicProvider {
+    async fn complete(&amp;self, request: CompletionRequest) -&gt; Result&lt;CompletionResponse&gt; {
+        // 转换为 Anthropic Messages API 格式
+        // 发送请求
+        // 解析响应
+    }
+    
+    fn capabilities(&amp;self) -&gt; Capabilities {
+        Capabilities {
+            supports_streaming: true,
+            supports_tool_use: true,
+            supports_vision: true,
+            supports_prompt_caching: true,
+            max_context_tokens: 200_000,
+        }
+    }
+}</code></pre></div>
+<h3 id="4-2-openai-兼容-provider">4.2 OpenAI 兼容 Provider</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-llm/src/openai.rs
+
+pub struct OpenAiProvider {
+    client: reqwest::Client,
+    api_key: String,
+    base_url: String,
+    model: String,
+}
+
+#[async_trait]
+impl LlmProvider for OpenAiProvider {
+    async fn complete(&amp;self, request: CompletionRequest) -&gt; Result&lt;CompletionResponse&gt; {
+        // 转换为 OpenAI Chat Completions API 格式
+    }
+    
+    fn capabilities(&amp;self) -&gt; Capabilities {
+        Capabilities {
+            supports_streaming: true,
+            supports_tool_use: true,
+            supports_vision: true,
+            supports_prompt_caching: false,
+            max_context_tokens: 128_000,
+        }
+    }
+}</code></pre></div>
+<h3 id="4-3-deepseek-provider">4.3 DeepSeek Provider</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-llm/src/deepseek.rs
+
+pub struct DeepSeekProvider {
+    inner: OpenAiProvider,  // DeepSeek 兼容 OpenAI API
+}
+
+impl DeepSeekProvider {
+    pub fn new(api_key: String, model: String) -&gt; Self {
+        Self {
+            inner: OpenAiProvider {
+                base_url: &quot;https://api.deepseek.com&quot;.into(),
+                api_key,
+                model,
+            },
+        }
+    }
+}</code></pre></div>
+<h2 id="5-provider-工厂">5. Provider 工厂</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-llm/src/lib.rs
+
+pub enum ProviderConfig {
+    Anthropic {
+        api_key: String,
+        model: String,
+        base_url: Option&lt;String&gt;,
+    },
+    OpenAi {
+        api_key: String,
+        model: String,
+        base_url: String,
+    },
+    DeepSeek {
+        api_key: String,
+        model: String,
+    },
+}
+
+pub fn create_provider(config: ProviderConfig) -&gt; Result&lt;Box&lt;dyn LlmProvider&gt;&gt; {
+    match config {
+        ProviderConfig::Anthropic { api_key, model, base_url } =&gt; {
+            Ok(Box::new(AnthropicProvider::new(api_key, model, base_url)))
+        }
+        ProviderConfig::OpenAi { api_key, model, base_url } =&gt; {
+            Ok(Box::new(OpenAiProvider::new(api_key, model, base_url)))
+        }
+        ProviderConfig::DeepSeek { api_key, model } =&gt; {
+            Ok(Box::new(DeepSeekProvider::new(api_key, model)))
+        }
+    }
+}</code></pre></div>
+<h2 id="6-能力协商">6. 能力协商</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">pub struct Capabilities {
+    pub supports_streaming: bool,
+    pub supports_tool_use: bool,
+    pub supports_vision: bool,
+    pub supports_prompt_caching: bool,
+    pub max_context_tokens: u32,
+}
+
+impl Capabilities {
+    fn can_use_tools(&amp;self) -&gt; bool {
+        self.supports_tool_use
+    }
+    
+    fn cache_key(&amp;self) -&gt; &amp;&#39;static str {
+        if self.supports_prompt_caching {
+            &quot;cached&quot;
+        } else {
+            &quot;uncached&quot;
+        }
+    }
+}</code></pre></div>
+<h2 id="7-prompt-caching">7. Prompt Caching</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// Anthropic prompt caching 实现
+fn apply_prompt_caching(&amp;self, request: &amp;mut AnthropicRequest) {
+    // 对 system + tools + 前几条 user turn 添加 cache_control
+    if let Some(ref mut system) = request.system {
+        system.cache_control = Some(CacheControl { type_: &quot;ephemeral&quot; });
+    }
+}</code></pre></div>
+<h2 id="8-使用示例">8. 使用示例</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">use hermes_llm::{ProviderConfig, create_provider};
+use hermes_core::{CompletionRequest, Message};
+
+#[tokio::main]
+async fn main() -&gt; Result&lt;()&gt; {
+    let provider = create_provider(ProviderConfig::Anthropic {
+        api_key: std::env::var(&quot;ANTHROPIC_API_KEY&quot;)?,
+        model: &quot;claude-sonnet-4-20250514&quot;.into(),
+        base_url: None,
+    })?;
+    
+    let request = CompletionRequest {
+        model: &quot;claude-sonnet-4-20250514&quot;.into(),
+        system: Some(&quot;You are a helpful assistant.&quot;.into()),
+        messages: vec![Message::user_text(&quot;Hello!&quot;)],
+        tools: vec![],
+        max_tokens: 1024,
+        temperature: None,
+        enable_caching: true,
+    };
+    
+    let response = provider.complete(request).await?;
+    println!(&quot;Response: {:?}&quot;, response.content);
+    
+    Ok(())
+}</code></pre></div></article><aside class="toc" aria-label="本页目录"></aside></main>
+  <footer class="doc-footer">本页为可离线浏览的重构规范；代码示例是实现合同，不是已交付源码。</footer>
+  <script src="assets/site.js"></script>
+</body>
+</html>

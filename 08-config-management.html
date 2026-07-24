@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>配置管理 · agent-core</title>
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-core</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Core</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
+  <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="配置管理">配置管理</h1>
+<h2 id="1-概述">1. 概述</h2>
+<p>TOML 格式配置文件，支持环境变量覆盖、默认值和验证。</p>
+<h2 id="2-配置文件结构">2. 配置文件结构</h2>
+<div class="code-block"><span class="code-block__lang">toml</span><button class="copy-code" type="button">复制</button><pre><code class="language-toml"># ~/.hermes/config.toml
+
+default_provider = &quot;anthropic&quot;
+log_level = &quot;info&quot;
+
+# LLM Providers
+[providers.anthropic]
+base_url = &quot;https://api.anthropic.com&quot;
+api_key = &quot;sk-ant-...&quot;
+model = &quot;claude-sonnet-4-20250514&quot;
+max_tokens = 16384
+
+[providers.deepseek]
+base_url = &quot;https://api.deepseek.com&quot;
+api_key = &quot;sk-...&quot;
+model = &quot;deepseek-chat&quot;
+
+# MCP 服务器
+[mcp_servers.filesystem]
+command = &quot;npx&quot;
+args = [&quot;-y&quot;, &quot;@modelcontextprotocol/server-filesystem&quot;, &quot;/workspace&quot;]
+
+# 存储
+[storage]
+base_dir = &quot;~/.hermes/data&quot;
+sessions_dir = &quot;~/.hermes/sessions&quot;
+skills_dir = &quot;~/.hermes/skills&quot;
+memories_dir = &quot;~/.hermes/memories&quot;
+
+# 压缩
+[compaction]
+strategy = &quot;auto&quot;
+max_context_tokens = 180000
+trigger_threshold = 0.8
+
+# Tauri 特定
+[tauri]
+theme = &quot;system&quot;  # light | dark | system
+font_size = 13</code></pre></div>
+<h2 id="3-配置结构体">3. 配置结构体</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-config/src/lib.rs
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(default = &quot;default_provider&quot;)]
+    pub default_provider: String,
+    
+    #[serde(default = &quot;default_log_level&quot;)]
+    pub log_level: String,
+    
+    #[serde(default)]
+    pub providers: HashMap&lt;String, ProviderConfig&gt;,
+    
+    #[serde(default)]
+    pub mcp_servers: HashMap&lt;String, ServerSpec&gt;,
+    
+    #[serde(default)]
+    pub storage: StorageConfig,
+    
+    #[serde(default)]
+    pub compaction: CompactionConfig,
+    
+    #[serde(default)]
+    pub tauri: Option&lt;TauriConfig&gt;,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub max_tokens: Option&lt;u32&gt;,
+    pub temperature: Option&lt;f32&gt;,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageConfig {
+    pub base_dir: PathBuf,
+    pub sessions_dir: PathBuf,
+    pub skills_dir: PathBuf,
+    pub memories_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionConfig {
+    #[serde(default = &quot;default_compaction_strategy&quot;)]
+    pub strategy: String,
+    
+    #[serde(default = &quot;default_max_context&quot;)]
+    pub max_context_tokens: u32,
+    
+    #[serde(default = &quot;default_trigger&quot;)]
+    pub trigger_threshold: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TauriConfig {
+    #[serde(default = &quot;default_theme&quot;)]
+    pub theme: String,
+    
+    #[serde(default = &quot;default_font_size&quot;)]
+    pub font_size: u32,
+}</code></pre></div>
+<h2 id="4-加载与验证">4. 加载与验证</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">impl Config {
+    /// 加载配置（按优先级：文件 &gt; 环境变量 &gt; 默认值）
+    pub fn load() -&gt; Result&lt;Self&gt; {
+        // 1. 加载文件
+        let path = Self::config_path();
+        let mut config = if path.exists() {
+            let content = std::fs::read_to_string(&amp;path)?;
+            toml::from_str(&amp;content)?
+        } else {
+            Config::default()
+        };
+        
+        // 2. 环境变量覆盖
+        if let Ok(key) = std::env::var(&quot;ANTHROPIC_API_KEY&quot;) {
+            if let Some(provider) = config.providers.get_mut(&quot;anthropic&quot;) {
+                provider.api_key = key;
+            }
+        }
+        
+        // 3. 验证
+        config.validate()?;
+        
+        Ok(config)
+    }
+    
+    fn validate(&amp;self) -&gt; Result&lt;()&gt; {
+        // 检查默认 provider 存在
+        if !self.providers.contains_key(&amp;self.default_provider) {
+            return Err(Error::Config(format!(
+                &quot;default provider &#39;{}&#39; not configured&quot;,
+                self.default_provider
+            )));
+        }
+        
+        // 检查 API key 非空
+        for (name, provider) in &amp;self.providers {
+            if provider.api_key.is_empty() {
+                return Err(Error::Config(format!(
+                    &quot;provider &#39;{}&#39; has empty api_key&quot;, name
+                )));
+            }
+        }
+        
+        // 检查存储目录可写
+        if !self.storage.base_dir.exists() {
+            std::fs::create_dir_all(&amp;self.storage.base_dir)?;
+        }
+        
+        Ok(())
+    }
+    
+    fn config_path() -&gt; PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from(&quot;.&quot;))
+            .join(&quot;.hermes/config.toml&quot;)
+    }
+    
+    /// 获取指定 provider 的配置
+    pub fn provider(&amp;self, name: &amp;str) -&gt; Result&lt;&amp;ProviderConfig&gt; {
+        self.providers.get(name)
+            .ok_or(Error::ProviderNotFound(name.to_string()))
+    }
+    
+    /// 获取默认 provider
+    pub fn default_provider_config(&amp;self) -&gt; Result&lt;&amp;ProviderConfig&gt; {
+        self.provider(&amp;self.default_provider)
+    }
+}</code></pre></div>
+<h2 id="5-默认值">5. 默认值</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">fn default_provider() -&gt; String { &quot;anthropic&quot;.into() }
+fn default_log_level() -&gt; String { &quot;info&quot;.into() }
+fn default_compaction_strategy() -&gt; String { &quot;auto&quot;.into() }
+fn default_max_context() -&gt; u32 { 180_000 }
+fn default_trigger() -&gt; f64 { 0.8 }
+fn default_theme() -&gt; String { &quot;system&quot;.into() }
+fn default_font_size() -&gt; u32 { 13 }</code></pre></div></article><aside class="toc" aria-label="本页目录"></aside></main>
+  <footer class="doc-footer">本页为可离线浏览的重构规范；代码示例是实现合同，不是已交付源码。</footer>
+  <script src="assets/site.js"></script>
+</body>
+</html>

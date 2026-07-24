@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>ToolHost 抽象 · agent-core</title>
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-core</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Core</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
+  <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="toolhost-抽象">ToolHost 抽象</h1>
+<h2 id="1-概述">1. 概述</h2>
+<p>ToolHost 是工具的执行抽象层。它聚合多个工具来源（MCP server、内置工具、网关代理），<br>为 Agent 循环提供统一的工具调用接口。</p>
+<h2 id="2-trait-定义">2. Trait 定义</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-core/src/tool_host.rs
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallOutcome {
+    pub content: String,
+    pub is_error: bool,
+    pub metadata: Option&lt;Value&gt;,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub source: ToolSource,
+    pub requires_confirmation: bool,
+}
+
+pub enum ToolSource {
+    Builtin,           // 内置工具
+    MCP { server: String },  // MCP 工具
+    Gateway,           // Charter Tool Gateway 代理
+    Custom { id: String },   // 自定义工具
+}
+
+#[async_trait]
+pub trait ToolHost: Send + Sync {
+    /// 列出所有可用工具
+    async fn list_tools(&amp;self) -&gt; Result&lt;Vec&lt;ToolSpec&gt;&gt;;
+    
+    /// 执行工具调用
+    async fn call(&amp;self, name: &amp;str, args: Value) -&gt; Result&lt;ToolCallOutcome&gt;;
+    
+    /// 批量执行（用于并行工具调用）
+    async fn call_batch(&amp;self, calls: Vec&lt;(String, Value)&gt;) -&gt; Vec&lt;Result&lt;ToolCallOutcome&gt;&gt; {
+        let mut results = Vec::with_capacity(calls.len());
+        for (name, args) in calls {
+            results.push(self.call(&amp;name, args).await);
+        }
+        results
+    }
+}</code></pre></div>
+<h2 id="3-空实现">3. 空实现</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">pub struct NullToolHost;
+
+#[async_trait]
+impl ToolHost for NullToolHost {
+    async fn list_tools(&amp;self) -&gt; Result&lt;Vec&lt;ToolSpec&gt;&gt; {
+        Ok(Vec::new())
+    }
+    
+    async fn call(&amp;self, name: &amp;str, _: Value) -&gt; Result&lt;ToolCallOutcome&gt; {
+        Err(Error::ToolHost(format!(&quot;no tool host configured; cannot call {name:?}&quot;)))
+    }
+}</code></pre></div>
+<h2 id="4-mcp-工具聚合">4. MCP 工具聚合</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-mcp/src/host.rs
+
+pub struct McpToolHost {
+    servers: Vec&lt;McpServer&gt;,
+    cache: RwLock&lt;HashMap&lt;String, Vec&lt;ToolSpec&gt;&gt;&gt;,
+}
+
+impl McpToolHost {
+    pub fn new(servers: Vec&lt;McpServer&gt;) -&gt; Self {
+        Self {
+            servers,
+            cache: RwLock::new(HashMap::new()),
+        }
+    }
+    
+    pub async fn add_server(&amp;mut self, server: McpServer) -&gt; Result&lt;()&gt; {
+        server.connect().await?;
+        self.servers.push(server);
+        self.cache.write().await.clear();  // 失效缓存
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ToolHost for McpToolHost {
+    async fn list_tools(&amp;self) -&gt; Result&lt;Vec&lt;ToolSpec&gt;&gt; {
+        // 检查缓存
+        let cache = self.cache.read().await;
+        let cached: Vec&lt;ToolSpec&gt; = cache.values().flatten().cloned().collect();
+        if !cached.is_empty() {
+            return Ok(cached);
+        }
+        drop(cache);
+        
+        // 从所有 server 收集
+        let mut all_tools = Vec::new();
+        let mut cache = self.cache.write().await;
+        
+        for server in &amp;self.servers {
+            let tools = server.list_tools().await?;
+            let specs: Vec&lt;ToolSpec&gt; = tools.into_iter().map(|t| ToolSpec {
+                name.name: format!(&quot;{}__{}&quot;, server.name(), t.name),
+                description: t.description,
+                input_schema: t.input_schema,
+                source: ToolSource::MCP { server: server.name().to_string() },
+                requires_confirmation: true,  // MCP 工具默认需要确认
+            }).collect();
+            
+            cache.insert(server.name().to_string(), specs.clone());
+            all_tools.extend(specs);
+        }
+        
+        Ok(all_tools)
+    }
+    
+    async fn call(&amp;self, name: &amp;str, args: Value) -&gt; Result&lt;ToolCallOutcome&gt; {
+        // 解析 namespaced name: &quot;&lt;server&gt;__&lt;tool&gt;&quot;
+        let parts: Vec&lt;&amp;str&gt; = name.splitn(2, &quot;__&quot;).collect();
+        if parts.len() != 2 {
+            return Err(Error::ToolHost(format!(&quot;invalid tool name format: {name:?}&quot;)));
+        }
+        
+        let (server_name, tool_name) = (parts[0], parts[1]);
+        
+        // 找到对应 server
+        let server = self.servers.iter()
+            .find(|s| s.name() == server_name)
+            .ok_or(Error::ToolHost(format!(&quot;server not found: {server_name}&quot;)))?;
+        
+        server.call_tool(tool_name, args).await
+    }
+}</code></pre></div>
+<h2 id="5-charter-tool-gateway-桥接">5. Charter Tool Gateway 桥接</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// R-Code（Charter）特有层：将 ToolHost 桥接到 Tool Gateway
+
+pub struct GatewayToolHost {
+    gateway: Arc&lt;ToolGateway&gt;,
+    task_id: String,
+    terminal_id: Option&lt;String&gt;,
+}
+
+impl GatewayToolHost {
+    pub fn new(gateway: Arc&lt;ToolGateway&gt;, task_id: String) -&gt; Self {
+        Self { gateway, task_id, terminal_id: None }
+    }
+}
+
+#[async_trait]
+impl ToolHost for GatewayToolHost {
+    async fn list_tools(&amp;self) -&gt; Result&lt;Vec&lt;ToolSpec&gt;&gt; {
+        let tools = self.gateway.list_tools(&amp;self.task_id).await?;
+        Ok(tools.into_iter().map(|t| ToolSpec {
+            name: t.name,
+            description: t.description,
+            input_schema: t.input_schema,
+            source: ToolSource::Gateway,
+            requires_confirmation: t.risk_level &gt;= RiskLevel::R2,
+        }).collect())
+    }
+    
+    async fn call(&amp;self, name: &amp;str, args: Value) -&gt; Result&lt;ToolCallOutcome&gt; {
+        let request = ToolCallRequest {
+            tool_name: name.to_string(),
+            input: args,
+            task_id: self.task_id.clone(),
+            caller_terminal: self.terminal_id.clone(),
+        };
+        
+        match self.gateway.execute(request).await {
+            Ok(result) =&gt; Ok(ToolCallOutcome {
+                content: serde_json::to_string(&amp;result.output)?,
+                is_error: false,
+                metadata: Some(json!({
+                    &quot;risk_level&quot;: result.risk_level,
+                    &quot;tool_call_id&quot;: result.call_id,
+                })),
+            }),
+            Err(e) =&gt; Ok(ToolCallOutcome {
+                content: format!(&quot;Tool call failed: {e}&quot;),
+                is_error: true,
+                metadata: None,
+            }),
+        }
+    }
+}</code></pre></div>
+<h2 id="6-组合-toolhost">6. 组合 ToolHost</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">/// 组合多个 ToolHost，按优先级查找
+pub struct CompositeToolHost {
+    hosts: Vec&lt;Box&lt;dyn ToolHost&gt;&gt;,
+}
+
+impl CompositeToolHost {
+    pub fn new() -&gt; Self {
+        Self { hosts: Vec::new() }
+    }
+    
+    pub fn add_host(&amp;mut self, host: Box&lt;dyn ToolHost&gt;) {
+        self.hosts.push(host);
+    }
+}
+
+#[async_trait]
+impl ToolHost for CompositeToolHost {
+    async fn list_tools(&amp;self) -&gt; Result&lt;Vec&lt;ToolSpec&gt;&gt; {
+        let mut all_tools = Vec::new();
+        for host in &amp;self.hosts {
+            all_tools.extend(host.list_tools().await?);
+        }
+        Ok(all_tools)
+    }
+    
+    async fn call(&amp;self, name: &amp;str, args: Value) -&gt; Result&lt;ToolCallOutcome&gt; {
+        // 按优先级尝试每个 host
+        for host in &amp;self.hosts {
+            if host.list_tools().await?.iter().any(|t| t.name == name) {
+                return host.call(name, args).await;
+            }
+        }
+        Err(Error::ToolHost(format!(&quot;tool not found: {name:?}&quot;)))
+    }
+}</code></pre></div></article><aside class="toc" aria-label="本页目录"></aside></main>
+  <footer class="doc-footer">本页为可离线浏览的重构规范；代码示例是实现合同，不是已交付源码。</footer>
+  <script src="assets/site.js"></script>
+</body>
+</html>

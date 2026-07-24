@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>错误处理 · agent-core</title>
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-core</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Core</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
+  <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="错误处理">错误处理</h1>
+<h2 id="1-概述">1. 概述</h2>
+<p>统一的错误处理体系，使用 <code>thiserror</code> 定义错误类型，<br>支持跨模块传播和上下文携带。</p>
+<h2 id="2-错误类型定义">2. 错误类型定义</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-core/src/error.rs
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    // 会话相关
+    #[error(&quot;session not found: {0}&quot;)]
+    SessionNotFound(String),
+    
+    #[error(&quot;session is locked: {0}&quot;)]
+    SessionLocked(String),
+    
+    #[error(&quot;invalid session format: {0}&quot;)]
+    InvalidSession(String),
+    
+    #[error(&quot;session recovery failed: {0}&quot;)]
+    SessionRecoveryFailed(String),
+    
+    // Provider 相关
+    #[error(&quot;provider error: {0}&quot;)]
+    Provider(String),
+    
+    #[error(&quot;API error: {status} - {message}&quot;)]
+    ApiError { status: u16, message: String },
+    
+    #[error(&quot;rate limited, retry after {retry_after}s&quot;)]
+    RateLimited { retry_after: u64 },
+    
+    #[error(&quot;authentication failed: {0}&quot;)]
+    AuthFailed(String),
+    
+    #[error(&quot;model not found: {0}&quot;)]
+    ModelNotFound(String),
+    
+    // 工具相关
+    #[error(&quot;tool error: {0}&quot;)]
+    ToolHost(String),
+    
+    #[error(&quot;tool not found: {0}&quot;)]
+    ToolNotFound(String),
+    
+    #[error(&quot;tool call failed: {message}&quot;)]
+    ToolCallFailed { tool: String, message: String },
+    
+    #[error(&quot;permission denied: {0}&quot;)]
+    PermissionDenied(String),
+    
+    #[error(&quot;risk level too high: {level} exceeds threshold {threshold}&quot;)]
+    RiskTooHigh { level: String, threshold: String },
+    
+    // MCP 相关
+    #[error(&quot;MCP error: {0}&quot;)]
+    Mcp(String),
+    
+    #[error(&quot;MCP server not connected: {0}&quot;)]
+    McpNotConnected(String),
+    
+    #[error(&quot;MCP server not found: {0}&quot;)]
+    McpServerNotFound(String),
+    
+    // 配置相关
+    #[error(&quot;config error: {0}&quot;)]
+    Config(String),
+    
+    #[error(&quot;config file not found: {0}&quot;)]
+    ConfigNotFound(PathBuf),
+    
+    // 存储相关
+    #[error(&quot;storage error: {0}&quot;)]
+    Storage(String),
+    
+    #[error(&quot;IO error: {0}&quot;)]
+    Io(#[from] std::io::Error),
+    
+    // 序列化
+    #[error(&quot;JSON error: {0}&quot;)]
+    Json(#[from] serde_json::Error),
+    
+    #[error(&quot;YAML error: {0}&quot;)]
+    Yaml(#[from] serde_yaml::Error),
+    
+    #[error(&quot;TOML error: {0}&quot;)]
+    Toml(#[from] toml::de::Error),
+    
+    // IPC
+    #[error(&quot;IPC error: {0}&quot;)]
+    Ipc(String),
+    
+    #[error(&quot;IPC timeout&quot;)]
+    IpcTimeout,
+    
+    // 压缩
+    #[error(&quot;compaction failed: {0}&quot;)]
+    Compaction(String),
+    
+    #[error(&quot;strategy not found: {0}&quot;)]
+    StrategyNotFound(String),
+    
+    // 其他
+    #[error(&quot;internal error: {0}&quot;)]
+    Internal(String),
+    
+    #[error(&quot;not implemented: {0}&quot;)]
+    NotImplemented(String),
+    
+    #[error(&quot;{0}&quot;)]
+    Other(String),
+}
+
+pub type Result&lt;T&gt; = std::result::Result&lt;T, Error&gt;;</code></pre></div>
+<h2 id="3-错误上下文">3. 错误上下文</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// 错误上下文携带
+#[derive(Debug)]
+pub struct ErrorContext {
+    pub module: String,
+    pub operation: String,
+    pub session_id: Option&lt;String&gt;,
+    pub tool_name: Option&lt;String&gt;,
+    pub source: Option&lt;Box&lt;dyn std::error::Error + Send + Sync&gt;&gt;,
+}
+
+impl fmt::Display for ErrorContext {
+    fn fmt(&amp;self, f: &amp;mut fmt::Formatter&lt;&#39;_&gt;) -&gt; fmt::Result {
+        write!(f, &quot;[{}] {}&quot;, self.module, self.operation)?;
+        if let Some(sid) = &amp;self.session_id {
+            write!(f, &quot; (session={})&quot;, sid)?;
+        }
+        if let Some(tool) = &amp;self.tool_name {
+            write!(f, &quot; (tool={})&quot;, tool)?;
+        }
+        Ok(())
+    }
+}
+
+// 扩展 trait 用于添加上下文
+pub trait ResultExt&lt;T&gt; {
+    fn with_session(self, session_id: &amp;str) -&gt; Result&lt;T&gt;;
+    fn with_tool(self, tool_name: &amp;str) -&gt; Result&lt;T&gt;;
+}
+
+impl&lt;T&gt; ResultExt&lt;T&gt; for Result&lt;T&gt; {
+    fn with_session(self, session_id: &amp;str) -&gt; Result&lt;T&gt; {
+        self.map_err(|e| Error::SessionNotFound(format!(&quot;{}: {}&quot;, session_id, e)))
+    }
+    
+    fn with_tool(self, tool_name: &amp;str) -&gt; Result&lt;T&gt; {
+        self.map_err(|e| Error::ToolCallFailed {
+            tool: tool_name.to_string(),
+            message: e.to_string(),
+        })
+    }
+}</code></pre></div>
+<h2 id="4-错误恢复策略">4. 错误恢复策略</h2>
+<table><thead><tr><th>错误类型</th><th>恢复策略</th></tr></thead><tbody><tr><td>RateLimited</td><td>指数退避重试</td></tr><tr><td>AuthFailed</td><td>提示用户更新 API key</td></tr><tr><td>SessionRecoveryFailed</td><td>尝试截断恢复</td></tr><tr><td>McpNotConnected</td><td>自动重连</td></tr><tr><td>ToolCallFailed</td><td>向 LLM 报告错误，让模型决定</td></tr><tr><td>IpcTimeout</td><td>重试 + 通知用户</td></tr><tr><td>RiskTooHigh</td><td>提示用户手动审批</td></tr></tbody></table>
+<h2 id="5-错误传播示例">5. 错误传播示例</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">async fn execute_tool_call(host: &amp;dyn ToolHost, call: &amp;ToolUse) -&gt; Result&lt;ToolCallOutcome&gt; {
+    host.call(&amp;call.name, call.input.clone())
+        .await
+        .map_err(|e| Error::ToolCallFailed {
+            tool: call.name.clone(),
+            message: e.to_string(),
+        })
+}</code></pre></div></article><aside class="toc" aria-label="本页目录"></aside></main>
+  <footer class="doc-footer">本页为可离线浏览的重构规范；代码示例是实现合同，不是已交付源码。</footer>
+  <script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>消息类型 · agent-core</title>
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-core</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Core</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
+  <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="消息类型">消息类型</h1>
+<h2 id="1-概述">1. 概述</h2>
+<p>定义 Agent 对话中的消息、内容块、角色等核心数据类型。<br>设计参考 Anthropic Messages API（最表达力），其他 Provider 向下兼容。</p>
+<h2 id="2-核心类型">2. 核心类型</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-core/src/message.rs
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = &quot;lowercase&quot;)]
+pub enum Role {
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub role: Role,
+    pub content: Vec&lt;ContentBlock&gt;,
+}
+
+impl Message {
+    pub fn user_text(text: impl Into&lt;String&gt;) -&gt; Self {
+        Self { role: Role::User, content: vec![ContentBlock::Text { text: text.into() }] }
+    }
+    
+    pub fn assistant_text(text: impl Into&lt;String&gt;) -&gt; Self {
+        Self { role: Role::Assistant, content: vec![ContentBlock::Text { text: text.into() }] }
+    }
+}</code></pre></div>
+<blockquote><p><strong>注意</strong>：<code>Role</code> 只有 <code>User</code> 和 <code>Assistant</code> 两种。系统提示<strong>不是</strong>消息角色，<br>而是 <code>CompletionRequest.system: Option&lt;String&gt;</code> 的独立顶层字段（与 Anthropic Messages API 一致）。<br>这与 OpenAI Chat Completions（有 <code>system</code> role）不同，Provider 适配层负责转换。</p></blockquote>
+<h2 id="3-内容块">3. 内容块</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = &quot;type&quot;, rename_all = &quot;snake_case&quot;)]
+pub enum ContentBlock {
+    Text { text: String },
+    
+    Thinking {
+        thinking: String,
+        #[serde(default, skip_serializing_if = &quot;Option::is_none&quot;)]
+        signature: Option&lt;String&gt;,
+    },
+    
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(default)]
+        is_error: bool,
+    },
+    
+    Image {
+        source: ImageSource,
+    },
+    
+    /// R-Code（Charter）特有：文件引用
+    FileRef {
+        path: String,
+        is_folder: bool,
+    },
+    
+    /// R-Code（Charter）特有：代码选区
+    SelectionRef {
+        path: String,
+        start_line: u32,
+        end_line: u32,
+        hash: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageSource {
+    #[serde(rename = &quot;type&quot;)]
+    pub kind: String,
+    pub media_type: String,
+    pub data: String,
+}</code></pre></div>
+<h2 id="4-内容块工具方法">4. 内容块工具方法</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">impl ContentBlock {
+    pub fn as_text(&amp;self) -&gt; Option&lt;&amp;str&gt; {
+        match self {
+            ContentBlock::Text { text } =&gt; Some(text),
+            _ =&gt; None,
+        }
+    }
+    
+    pub fn is_tool_use(&amp;self) -&gt; bool {
+        matches!(self, ContentBlock::ToolUse { .. })
+    }
+    
+    pub fn tool_name(&amp;self) -&gt; Option&lt;&amp;str&gt; {
+        match self {
+            ContentBlock::ToolUse { name, .. } =&gt; Some(name),
+            _ =&gt; None,
+        }
+    }
+    
+    pub fn tool_id(&amp;self) -&gt; Option&lt;&amp;str&gt; {
+        match self {
+            ContentBlock::ToolUse { id, .. } =&gt; Some(id),
+            _ =&gt; None,
+        }
+    }
+}
+
+impl Message {
+    pub fn text_content(&amp;self) -&gt; String {
+        self.content.iter()
+            .filter_map(|b| b.as_text())
+            .collect::&lt;Vec&lt;_&gt;&gt;()
+            .join(&quot;&quot;)
+    }
+    
+    pub fn tool_uses(&amp;self) -&gt; Vec&lt;&amp;ContentBlock&gt; {
+        self.content.iter()
+            .filter(|b| b.is_tool_use())
+            .collect()
+    }
+}</code></pre></div>
+<h2 id="5-provider-适配">5. Provider 适配</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// 将内部消息转换为 Anthropic 格式
+impl From&lt;&amp;Message&gt; for AnthropicMessage {
+    fn from(msg: &amp;Message) -&gt; Self {
+        AnthropicMessage {
+            role: match msg.role {
+                Role::User =&gt; &quot;user&quot;,
+                Role::Assistant =&gt; &quot;assistant&quot;,
+            },
+            content: msg.content.iter().map(|b| match b {
+                ContentBlock::Text { text } =&gt; AnthropicContent::Text { text: text.clone() },
+                ContentBlock::ToolUse { id, name, input } =&gt; AnthropicContent::ToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                },
+                ContentBlock::ToolResult { tool_use_id, content, is_error } =&gt; {
+                    AnthropicContent::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        content: content.clone(),
+                        is_error: *is_error,
+                    }
+                }
+                _ =&gt; AnthropicContent::Text { text: &quot;[unsupported content]&quot;.into() },
+            }).collect(),
+        }
+    }
+}</code></pre></div>
+<h2 id="6-token-计数估算">6. Token 计数估算</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">impl Message {
+    pub fn estimate_tokens(&amp;self) -&gt; u32 {
+        let mut tokens = 0u32;
+        for block in &amp;self.content {
+            match block {
+                ContentBlock::Text { text } =&gt; tokens += (text.len() / 4) as u32,
+                ContentBlock::Thinking { thinking, .. } =&gt; tokens += (thinking.len() / 4) as u32,
+                ContentBlock::ToolUse { input, .. } =&gt; tokens += (input.to_string().len() / 4) as u32,
+                ContentBlock::ToolResult { content, .. } =&gt; tokens += (content.len() / 4) as u32,
+                _ =&gt; tokens += 10,  // 默认估算
+            }
+        }
+        tokens
+    }
+}</code></pre></div></article><aside class="toc" aria-label="本页目录"></aside></main>
+  <footer class="doc-footer">本页为可离线浏览的重构规范；代码示例是实现合同，不是已交付源码。</footer>
+  <script src="assets/site.js"></script>
+</body>
+</html>

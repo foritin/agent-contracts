@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>API 契约 · agent-core</title>
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-core</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Core</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
+  <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="api-契约">API 契约</h1>
+<h2 id="概述">概述</h2>
+<p>本文档定义公共模块之间、以及公共模块与应用程序之间的 API 契约。<br>确保 Charter 和 Hermes 可以无缝使用这些共享模块。</p>
+<hr>
+<h2 id="1-llm-provider-api">1. LLM Provider API</h2>
+<h3 id="1-1-trait-定义">1.1 Trait 定义</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">#[async_trait]
+pub trait LlmProvider: Send + Sync {
+    async fn complete(&amp;self, request: CompletionRequest) 
+        -&gt; Result&lt;CompletionResponse&gt;;
+    
+    async fn stream(&amp;self, request: CompletionRequest) 
+        -&gt; Result&lt;BoxStream&lt;&#39;static, StreamEvent&gt;&gt;;
+    
+    fn capabilities(&amp;self) -&gt; Capabilities;
+    fn name(&amp;self) -&gt; &amp;str;
+}</code></pre></div>
+<h3 id="1-2-请求-响应格式">1.2 请求/响应格式</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">pub struct CompletionRequest {
+    pub model: String,
+    pub system: Option&lt;String&gt;,
+    pub messages: Vec&lt;Message&gt;,
+    pub tools: Vec&lt;ToolSpec&gt;,
+    pub max_tokens: u32,
+    pub temperature: Option&lt;f32&gt;,
+    pub enable_caching: bool,
+}
+
+pub struct CompletionResponse {
+    pub content: Vec&lt;ContentBlock&gt;,
+    pub stop_reason: StopReason,
+    pub usage: Usage,
+}
+
+pub enum StreamEvent {
+    TextDelta { text: String },
+    ToolUseStart { id: String, name: String },
+    ToolUseDelta { id: String, input_json: String },
+    ToolUseComplete { id: String, input: Value },
+    Stop { reason: StopReason },
+    Usage(Usage),
+}</code></pre></div>
+<h3 id="1-3-错误处理">1.3 错误处理</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">pub enum LlmError {
+    ApiError { status: u16, message: String },
+    RateLimited { retry_after: u64 },
+    AuthFailed(String),
+    ModelNotFound(String),
+    ConnectionFailed(String),
+    Timeout,
+    ParseError(String),
+}</code></pre></div>
+<hr>
+<h2 id="2-session-store-api">2. Session Store API</h2>
+<h3 id="2-1-trait-定义">2.1 Trait 定义</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">#[async_trait]
+pub trait SessionStore: Send + Sync {
+    async fn create(&amp;self, model: &amp;str, provider: &amp;str) -&gt; Result&lt;Session&gt;;
+    async fn load(&amp;self, id: &amp;str) -&gt; Result&lt;Session&gt;;
+    async fn append(&amp;self, id: &amp;str, event: SessionEvent) -&gt; Result&lt;()&gt;;
+    async fn list(&amp;self) -&gt; Result&lt;Vec&lt;SessionMeta&gt;&gt;;
+    async fn delete(&amp;self, id: &amp;str) -&gt; Result&lt;()&gt;;
+    async fn archive(&amp;self, id: &amp;str) -&gt; Result&lt;()&gt;;
+    async fn recover(&amp;self, id: &amp;str) -&gt; Result&lt;Session&gt;;
+}</code></pre></div>
+<h3 id="2-2-事件类型">2.2 事件类型</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">pub enum SessionEvent {
+    Meta(SessionMeta),
+    Message(Message),
+    Usage(Usage),
+    ToolCall { name: String, input: Value },
+    ToolResult { call_id: String, output: Value, is_error: bool },
+    System { event: String, data: Value },
+}</code></pre></div>
+<hr>
+<h2 id="3-toolhost-api">3. ToolHost API</h2>
+<h3 id="3-1-trait-定义">3.1 Trait 定义</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">#[async_trait]
+pub trait ToolHost: Send + Sync {
+    async fn list_tools(&amp;self) -&gt; Result&lt;Vec&lt;ToolSpec&gt;&gt;;
+    async fn call(&amp;self, name: &amp;str, args: Value) -&gt; Result&lt;ToolCallOutcome&gt;;
+    async fn call_batch(&amp;self, calls: Vec&lt;(String, Value)&gt;) 
+        -&gt; Vec&lt;Result&lt;ToolCallOutcome&gt;&gt;;
+}</code></pre></div>
+<h3 id="3-2-工具规格">3.2 工具规格</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub source: ToolSource,
+    pub requires_confirmation: bool,
+}</code></pre></div>
+<h3 id="3-3-调用结果">3.3 调用结果</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">pub struct ToolCallOutcome {
+    pub content: String,
+    pub is_error: bool,
+    pub metadata: Option&lt;Value&gt;,
+}</code></pre></div>
+<hr>
+<h2 id="4-mcp-client-api">4. MCP Client API</h2>
+<h3 id="4-1-配置">4.1 配置</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">pub struct McpConfig {
+    pub servers: HashMap&lt;String, ServerSpec&gt;,
+}
+
+pub enum ServerSpec {
+    Stdio {
+        command: String,
+        args: Vec&lt;String&gt;,
+        env: HashMap&lt;String, String&gt;,
+    },
+    Http {
+        url: String,
+        headers: HashMap&lt;String, String&gt;,
+    },
+}</code></pre></div>
+<h3 id="4-2-连接管理">4.2 连接管理</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">impl McpServer {
+    pub async fn connect(&amp;mut self) -&gt; Result&lt;()&gt;;
+    pub async fn disconnect(&amp;mut self) -&gt; Result&lt;()&gt;;
+    pub async fn list_tools(&amp;self) -&gt; Result&lt;Vec&lt;Tool&gt;&gt;;
+    pub async fn call_tool(&amp;self, name: &amp;str, args: Value) 
+        -&gt; Result&lt;ToolCallOutcome&gt;;
+    pub async fn health_check(&amp;self) -&gt; Result&lt;()&gt;;
+}</code></pre></div>
+<hr>
+<h2 id="5-storage-api">5. Storage API</h2>
+<h3 id="5-1-jsonl-会话存储">5.1 JSONL 会话存储</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">pub struct SessionStore {
+    base_dir: PathBuf,
+}
+
+impl SessionStore {
+    pub fn new(base_dir: PathBuf) -&gt; Self;
+    pub async fn create(&amp;self, model: &amp;str, provider: &amp;str) 
+        -&gt; Result&lt;Session&gt;;
+    pub async fn append(&amp;self, id: &amp;str, event: SessionEvent) 
+        -&gt; Result&lt;()&gt;;
+    pub async fn load(&amp;self, id: &amp;str) -&gt; Result&lt;Session&gt;;
+    pub async fn list(&amp;self) -&gt; Result&lt;Vec&lt;SessionMeta&gt;&gt;;
+}</code></pre></div>
+<h3 id="5-2-blob-存储">5.2 Blob 存储</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">pub struct BlobStore {
+    db: Arc&lt;Database&gt;,
+    blobs_dir: PathBuf,
+}
+
+impl BlobStore {
+    pub fn put(&amp;self, content: &amp;[u8]) -&gt; Result&lt;String&gt;;  // content hash
+    pub fn get(&amp;self, hash: &amp;str) -&gt; Result&lt;Vec&lt;u8&gt;&gt;;
+    pub fn exists(&amp;self, hash: &amp;str) -&gt; Result&lt;bool&gt;;
+    pub fn delete(&amp;self, hash: &amp;str) -&gt; Result&lt;()&gt;;
+}</code></pre></div>
+<hr>
+<h2 id="6-ipc-api">6. IPC API</h2>
+<h3 id="6-1-协议">6.1 协议</h3>
+<div class="code-block"><span class="code-block__lang">jsonc</span><button class="copy-code" type="button">复制</button><pre><code class="language-jsonc">// 请求
+{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;id&quot;: &quot;req-1&quot;,
+  &quot;method&quot;: &quot;tool.execute&quot;,
+  &quot;params&quot;: { &quot;name&quot;: &quot;read_file&quot;, &quot;input&quot;: { &quot;path&quot;: &quot;/foo.txt&quot; } }
+}
+
+// 响应
+{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;id&quot;: &quot;req-1&quot;,
+  &quot;result&quot;: { &quot;content&quot;: &quot;Hello World&quot; }
+}
+
+// 事件（无 id）
+{
+  &quot;jsonrpc&quot;: &quot;2.0&quot;,
+  &quot;method&quot;: &quot;agent.event&quot;,
+  &quot;params&quot;: { &quot;type&quot;: &quot;message&quot;, &quot;text&quot;: &quot;Hello&quot; }
+}</code></pre></div>
+<h3 id="6-2-服务端">6.2 服务端</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">pub struct IpcServer {
+    listener: UnixListener,
+    handlers: HashMap&lt;String, Box&lt;dyn IpcHandler&gt;&gt;,
+}
+
+impl IpcServer {
+    pub fn new(socket_path: PathBuf) -&gt; Result&lt;Self&gt;;
+    pub fn register(&amp;mut self, method: &amp;str, handler: Box&lt;dyn IpcHandler&gt;);
+    pub async fn serve(&amp;self) -&gt; Result&lt;()&gt;;
+}</code></pre></div>
+<h3 id="6-3-客户端">6.3 客户端</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">pub struct IpcClient {
+    stream: UnixStream,
+    pending: Arc&lt;Mutex&lt;HashMap&lt;String, oneshot::Sender&lt;JsonRpcResponse&gt;&gt;&gt;&gt;,
+}
+
+impl IpcClient {
+    pub async fn connect(socket_path: &amp;Path) -&gt; Result&lt;Self&gt;;
+    pub async fn call(&amp;self, method: &amp;str, params: Value) -&gt; Result&lt;Value&gt;;
+}</code></pre></div>
+<hr>
+<h2 id="7-config-api">7. Config API</h2>
+<h3 id="7-1-配置结构">7.1 配置结构</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">pub struct Config {
+    pub default_provider: String,
+    pub log_level: String,
+    pub providers: HashMap&lt;String, ProviderConfig&gt;,
+    pub mcp_servers: HashMap&lt;String, ServerSpec&gt;,
+    pub storage: StorageConfig,
+    pub compaction: CompactionConfig,
+    pub tauri: Option&lt;TauriConfig&gt;,
+}</code></pre></div>
+<h3 id="7-2-加载与验证">7.2 加载与验证</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">impl Config {
+    pub fn load() -&gt; Result&lt;Self&gt;;
+    pub fn load_from(path: &amp;Path) -&gt; Result&lt;Self&gt;;
+    pub fn validate(&amp;self) -&gt; Result&lt;()&gt;;
+    pub fn provider(&amp;self, name: &amp;str) -&gt; Result&lt;&amp;ProviderConfig&gt;;
+    pub fn default_provider_config(&amp;self) -&gt; Result&lt;&amp;ProviderConfig&gt;;
+}</code></pre></div>
+<hr>
+<h2 id="8-error-api">8. Error API</h2>
+<h3 id="8-1-错误类型">8.1 错误类型</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    // 会话
+    #[error(&quot;session not found: {0}&quot;)]
+    SessionNotFound(String),
+    #[error(&quot;session is locked: {0}&quot;)]
+    SessionLocked(String),
+    #[error(&quot;invalid session format: {0}&quot;)]
+    InvalidSession(String),
+    
+    // Provider
+    #[error(&quot;provider error: {0}&quot;)]
+    Provider(String),
+    #[error(&quot;API error: {status} - {message}&quot;)]
+    ApiError { status: u16, message: String },
+    #[error(&quot;rate limited, retry after {retry_after}s&quot;)]
+    RateLimited { retry_after: u64 },
+    #[error(&quot;authentication failed: {0}&quot;)]
+    AuthFailed(String),
+    
+    // 工具
+    #[error(&quot;tool error: {0}&quot;)]
+    ToolHost(String),
+    #[error(&quot;tool not found: {0}&quot;)]
+    ToolNotFound(String),
+    #[error(&quot;permission denied: {0}&quot;)]
+    PermissionDenied(String),
+    #[error(&quot;risk level too high: {level}&quot;)]
+    RiskTooHigh { level: String },
+    
+    // MCP
+    #[error(&quot;MCP error: {0}&quot;)]
+    Mcp(String),
+    #[error(&quot;MCP server not connected: {0}&quot;)]
+    McpNotConnected(String),
+    
+    // 配置
+    #[error(&quot;config error: {0}&quot;)]
+    Config(String),
+    #[error(&quot;config file not found: {0}&quot;)]
+    ConfigNotFound(PathBuf),
+    
+    // 存储
+    #[error(&quot;storage error: {0}&quot;)]
+    Storage(String),
+    #[error(&quot;IO error: {0}&quot;)]
+    Io(#[from] std::io::Error),
+    
+    // 序列化
+    #[error(&quot;JSON error: {0}&quot;)]
+    Json(#[from] serde_json::Error),
+    #[error(&quot;YAML error: {0}&quot;)]
+    Yaml(#[from] serde_yaml::Error),
+    #[error(&quot;TOML error: {0}&quot;)]
+    Toml(#[from] toml::de::Error),
+    
+    // IPC
+    #[error(&quot;IPC error: {0}&quot;)]
+    Ipc(String),
+    #[error(&quot;IPC timeout&quot;)]
+    IpcTimeout,
+    
+    // 压缩
+    #[error(&quot;compaction failed: {0}&quot;)]
+    Compaction(String),
+    
+    // 其他
+    #[error(&quot;internal error: {0}&quot;)]
+    Internal(String),
+    #[error(&quot;{0}&quot;)]
+    Other(String),
+}
+
+pub type Result&lt;T&gt; = std::result::Result&lt;T, Error&gt;;</code></pre></div>
+<hr>
+<h2 id="9-tauri-commands-api">9. Tauri Commands API</h2>
+<h3 id="9-1-聊天命令">9.1 聊天命令</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">#[tauri::command]
+async fn send_message(state: State&lt;&#39;_, AppState&gt;, message: String) 
+    -&gt; Result&lt;(), String&gt;;
+
+#[tauri::command]
+async fn cancel_stream(state: State&lt;&#39;_, AppState&gt;) 
+    -&gt; Result&lt;(), String&gt;;
+
+#[tauri::command]
+async fn respond_confirm(state: State&lt;&#39;_, AppState&gt;, call_id: String, allow: bool) 
+    -&gt; Result&lt;(), String&gt;;</code></pre></div>
+<h3 id="9-2-会话命令">9.2 会话命令</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">#[tauri::command]
+async fn list_sessions(state: State&lt;&#39;_, AppState&gt;) 
+    -&gt; Result&lt;Vec&lt;SessionMeta&gt;, String&gt;;
+
+#[tauri::command]
+async fn new_session(state: State&lt;&#39;_, AppState&gt;) 
+    -&gt; Result&lt;String, String&gt;;
+
+#[tauri::command]
+async fn load_session(state: State&lt;&#39;_, AppState&gt;, id: String) 
+    -&gt; Result&lt;Session, String&gt;;
+
+#[tauri::command]
+async fn delete_session(state: State&lt;&#39;_, AppState&gt;, id: String) 
+    -&gt; Result&lt;(), String&gt;;</code></pre></div>
+<h3 id="9-3-配置命令">9.3 配置命令</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">#[tauri::command]
+async fn get_config(state: State&lt;&#39;_, AppState&gt;) 
+    -&gt; Result&lt;Config, String&gt;;
+
+#[tauri::command]
+async fn update_config(state: State&lt;&#39;_, AppState&gt;, patch: ConfigPatch) 
+    -&gt; Result&lt;(), String&gt;;</code></pre></div>
+<h3 id="9-4-mcp-命令">9.4 MCP 命令</h3>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">#[tauri::command]
+async fn list_mcp_tools(state: State&lt;&#39;_, AppState&gt;) 
+    -&gt; Result&lt;Vec&lt;ToolSpec&gt;, String&gt;;
+
+#[tauri::command]
+async fn list_mcp_servers(state: State&lt;&#39;_, AppState&gt;) 
+    -&gt; Result&lt;Vec&lt;String&gt;, String&gt;;</code></pre></div>
+<hr>
+<h2 id="10-数据流契约">10. 数据流契约</h2>
+<h3 id="10-1-agent-事件流">10.1 Agent 事件流</h3>
+<div class="code-block"><span class="code-block__lang">text</span><button class="copy-code" type="button">复制</button><pre><code class="language-text">User → GUI → IPC → Agent Loop → LLM Provider
+              ← StreamEvent ←
+GUI ← IPC ← Event Translation ←</code></pre></div>
+<h3 id="10-2-工具调用流">10.2 工具调用流</h3>
+<div class="code-block"><span class="code-block__lang">text</span><button class="copy-code" type="button">复制</button><pre><code class="language-text">LLM → ToolUse → Agent Loop → ToolHost → MCP Server / Gateway
+       ToolResult ← Agent Loop ← ToolHost ←</code></pre></div>
+<h3 id="10-3-会话持久化">10.3 会话持久化</h3>
+<div class="code-block"><span class="code-block__lang">text</span><button class="copy-code" type="button">复制</button><pre><code class="language-text">Session Event → SessionStore → JSONL File
+                              ← Load on startup</code></pre></div>
+<hr>
+<h2 id="版本策略">版本策略</h2>
+<ul><li>公共模块遵循语义化版本（Semver）</li><li>Charter 和 Hermes 可锁定特定版本</li><li>破坏性变更需主版本号递增</li></ul></article><aside class="toc" aria-label="本页目录"></aside></main>
+  <footer class="doc-footer">本页为可离线浏览的重构规范；代码示例是实现合同，不是已交付源码。</footer>
+  <script src="assets/site.js"></script>
+</body>
+</html>

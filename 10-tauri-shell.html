@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Tauri 应用壳 · agent-core</title>
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-core</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Core</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
+  <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="tauri-应用壳">Tauri 应用壳</h1>
+<h2 id="1-概述">1. 概述</h2>
+<p>Tauri v2 应用壳，提供窗口管理、菜单、系统托盘、文件关联、自动更新等桌面应用基础能力。</p>
+<h2 id="2-应用结构">2. 应用结构</h2>
+<div class="code-block"><span class="code-block__lang">text</span><button class="copy-code" type="button">复制</button><pre><code class="language-text">hermes-gui/
+├── Cargo.toml
+├── tauri.conf.json
+├── src/
+│   ├── main.rs           # 入口
+│   ├── state.rs          # 全局状态
+│   ├── commands/         # Tauri 命令
+│   │   ├── mod.rs
+│   │   ├── chat.rs       # 聊天命令
+│   │   ├── session.rs    # 会话命令
+│   │   ├── config.rs     # 配置命令
+│   │   └── mcp.rs        # MCP 命令
+│   ├── events.rs         # 事件推送
+│   └── context.rs        # 应用上下文
+└── ui/                   # 前端（可选独立项目）
+    ├── index.html
+    ├── package.json
+    └── src/</code></pre></div>
+<h2 id="3-全局状态">3. 全局状态</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-gui/src/state.rs
+
+pub struct AppState {
+    pub config: Config,
+    pub session_store: SessionStore,
+    pub tool_host: Arc&lt;RwLock&lt;Box&lt;dyn ToolHost&gt;&gt;&gt;,
+    pub current_session: RwLock&lt;Option&lt;String&gt;&gt;,
+    pub event_sender: broadcast::Sender&lt;AppEvent&gt;,
+}
+
+impl AppState {
+    pub async fn init() -&gt; Result&lt;Self&gt; {
+        let config = Config::load()?;
+        
+        // 初始化日志
+        tracing_subscriber::fmt()
+            .with_env_filter(&amp;config.log_level)
+            .init();
+        
+        // 创建存储目录
+        tokio::fs::create_dir_all(&amp;config.storage.base_dir).await?;
+        
+        // 初始化组件
+        let session_store = SessionStore::new(config.storage.sessions_dir.clone());
+        let tool_host = create_tool_host(&amp;config).await?;
+        let (event_sender, _) = broadcast::channel(256);
+        
+        Ok(Self {
+            config,
+            session_store,
+            tool_host: Arc::new(RwLock::new(tool_host)),
+            current_session: RwLock::new(None),
+            event_sender,
+        })
+    }
+}</code></pre></div>
+<h2 id="4-tauri-命令">4. Tauri 命令</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-gui/src/commands/chat.rs
+
+#[tauri::command]
+pub async fn send_message(
+    state: State&lt;&#39;_, AppState&gt;,
+    message: String,
+) -&gt; Result&lt;(), String&gt; {
+    let mut session_id = state.current_session.write().await;
+    
+    // 创建或恢复会话
+    let session = if let Some(id) = session_id.as_ref() {
+        state.session_store.load(id).await.map_err(|e| e.to_string())?
+    } else {
+        let session = state.session_store.create(&quot;claude-sonnet-4&quot;, &quot;anthropic&quot;).await
+            .map_err(|e| e.to_string())?;
+        *session_id = Some(session.meta.id.clone());
+        session
+    };
+    
+    // 添加用户消息
+    session.push_user(&amp;message);
+    state.session_store.append(&amp;session.meta.id, SessionEvent::Message(
+        Message::user_text(&amp;message)
+    )).await.map_err(|e| e.to_string())?;
+    
+    // 调用 LLM（在后台任务中）
+    let tool_host = state.tool_host.read().await.clone();
+    let event_sender = state.event_sender.clone();
+    
+    tokio::spawn(async move {
+        match call_llm(&amp;session, &amp;*tool_host, event_sender).await {
+            Ok(response) =&gt; {
+                // 保存响应
+            }
+            Err(e) =&gt; {
+                // 发送错误事件
+                let _ = event_sender.send(AppEvent::Error(e.to_string()));
+            }
+        }
+    });
+    
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_stream(state: State&lt;&#39;_, AppState&gt;) -&gt; Result&lt;(), String&gt; {
+    // 取消当前流
+    Ok(())
+}</code></pre></div>
+<h2 id="5-事件推送">5. 事件推送</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-gui/src/events.rs
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = &quot;type&quot;, rename_all = &quot;snake_case&quot;)]
+pub enum AppEvent {
+    TextDelta { text: String },
+    ToolUse { name: String, input: Value },
+    ToolResult { call_id: String, output: String },
+    MessageComplete,
+    Error { message: String },
+    SessionChanged { session_id: String },
+    ConfigUpdated,
+}
+
+// 前端通过 listen 接收事件
+// const unlisten = await listen(&quot;app_event&quot;, (event) =&gt; { ... });</code></pre></div>
+<h2 id="6-安全配置">6. 安全配置</h2>
+<div class="code-block"><span class="code-block__lang">json</span><button class="copy-code" type="button">复制</button><pre><code class="language-json">// tauri.conf.json
+{
+  &quot;productName&quot;: &quot;Charter&quot;,
+  &quot;version&quot;: &quot;0.1.0&quot;,
+  &quot;identifier&quot;: &quot;com.charter.app&quot;,
+  &quot;build&quot;: {
+    &quot;beforeDevCommand&quot;: &quot;npm run dev&quot;,
+    &quot;devUrl&quot;: &quot;http://localhost:5173&quot;,
+    &quot;beforeBuildCommand&quot;: &quot;npm run build&quot;
+  },
+  &quot;app&quot;: {
+    &quot;windows&quot;: [
+      {
+        &quot;title&quot;: &quot;Charter&quot;,
+        &quot;width&quot;: 1200,
+        &quot;height&quot;: 800,
+        &quot;resizable&quot;: true,
+        &quot;fullscreen&quot;: false
+      }
+    ],
+    &quot;security&quot;: {
+      &quot;csp&quot;: &quot;default-src &#39;self&#39;; script-src &#39;self&#39;; style-src &#39;self&#39; &#39;unsafe-inline&#39;&quot;,
+      &quot;freezePrototype&quot;: true,
+      &quot;dangerousDisableAssetCspModification&quot;: false
+    }
+  },
+  &quot;bundle&quot;: {
+    &quot;active&quot;: true,
+    &quot;targets&quot;: &quot;all&quot;,
+    &quot;icon&quot;: [&quot;icons/32x32.png&quot;, &quot;icons/128x128.png&quot;, &quot;icons/icon.icns&quot;, &quot;icons/icon.ico&quot;]
+  }
+}</code></pre></div>
+<h2 id="7-使用示例">7. 使用示例</h2>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// main.rs
+fn main() {
+    tracing_subscriber::fmt::init();
+    
+    let state = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(AppState::init())
+        .expect(&quot;failed to initialize app state&quot;);
+    
+    tauri::Builder::default()
+        .manage(state)
+        .invoke_handler(tauri::generate_handler![
+            commands::chat::send_message,
+            commands::chat::cancel_stream,
+            commands::session::list_sessions,
+            commands::session::load_session,
+            commands::session::delete_session,
+            commands::config::get_config,
+            commands::config::update_config,
+            commands::mcp::list_mcp_tools,
+        ])
+        .run(tauri::generate_context!())
+        .expect(&quot;error while running tauri application&quot;);
+}</code></pre></div></article><aside class="toc" aria-label="本页目录"></aside></main>
+  <footer class="doc-footer">本页为可离线浏览的重构规范；代码示例是实现合同，不是已交付源码。</footer>
+  <script src="assets/site.js"></script>
+</body>
+</html>
