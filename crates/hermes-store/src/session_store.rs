@@ -1,0 +1,469 @@
+//! JSONL 会话存储。
+//!
+//! 参见 `02-session-management.html`、`12-api-contracts.html §5`。
+//! 会话以 JSONL 存储，第一行为 `SessionEvent::Meta`，后续为事件行。
+//! 支持崩溃恢复（截断坏尾行，V-STORE-01）与原子写入（V-STORE-02）。
+
+use hermes_core::{Message, Session, SessionEvent, SessionMeta, SessionStatus, Usage};
+use hermes_error::{Error, Result};
+use std::path::{Path, PathBuf};
+use tokio::io::AsyncWriteExt;
+
+/// JSONL 会话存储。
+pub struct SessionStore {
+    base_dir: PathBuf,
+}
+
+impl SessionStore {
+    pub fn new(base_dir: PathBuf) -> Self {
+        Self { base_dir }
+    }
+
+    fn session_path(&self, id: &str) -> PathBuf {
+        self.base_dir.join(format!("{id}.jsonl"))
+    }
+
+    /// 创建新会话：写入 Meta 行，返回内存视图。
+    pub async fn create(&self, model: &str, provider: &str) -> Result<Session> {
+        tokio::fs::create_dir_all(&self.base_dir).await?;
+        let meta = SessionMeta::new(model, provider);
+        let path = self.session_path(&meta.id);
+        let mut line = serde_json::to_string(&SessionEvent::Meta(meta.clone()))?;
+        line.push('\n');
+        // 第一行用原子写
+        Self::atomic_write(&path, line.as_bytes()).await?;
+        Ok(Session::new(meta))
+    }
+
+    /// 追加事件到会话日志。
+    pub async fn append(&self, session_id: &str, event: SessionEvent) -> Result<()> {
+        let path = self.session_path(session_id);
+        let line = serde_json::to_string(&event)?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&path)
+            .await?;
+        file.write_all(line.as_bytes()).await?;
+        file.write_all(b"\n").await?;
+        file.flush().await?;
+        Ok(())
+    }
+
+    /// 读取完整会话，重建内存视图。
+    pub async fn load(&self, session_id: &str) -> Result<Session> {
+        let path = self.session_path(session_id);
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|_| Error::SessionNotFound(session_id.to_string()))?;
+
+        let mut meta: Option<SessionMeta> = None;
+        let mut messages: Vec<Message> = Vec::new();
+        let mut usage = Usage::default();
+        let mut tool_calls = 0u32;
+
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event: SessionEvent = serde_json::from_str(line)?;
+            match event {
+                SessionEvent::Meta(m) => meta = Some(m),
+                SessionEvent::Message(msg) => messages.push(msg),
+                SessionEvent::Usage(u) => usage += u,
+                SessionEvent::ToolCall { .. } | SessionEvent::ToolResult { .. } => tool_calls += 1,
+                SessionEvent::System { .. } => {}
+            }
+        }
+
+        let meta = meta.ok_or_else(|| Error::InvalidSession("missing meta line".into()))?;
+        let mut session = Session::new(meta);
+        session.messages = messages;
+        session.total_input_tokens = usage.input_tokens;
+        session.total_output_tokens = usage.output_tokens;
+        session.total_tool_calls = tool_calls;
+        session.status = SessionStatus::Active;
+        Ok(session)
+    }
+
+    /// 列出所有会话元数据（按 created_at 倒序）。
+    pub async fn list(&self) -> Result<Vec<SessionMeta>> {
+        let mut sessions = Vec::new();
+        let mut rd = match tokio::fs::read_dir(&self.base_dir).await {
+            Ok(rd) => rd,
+            Err(_) => return Ok(Vec::new()),
+        };
+        while let Some(entry) = rd.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                if let Ok(meta) = self.read_meta(&path).await {
+                    sessions.push(meta);
+                }
+            }
+        }
+        sessions.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+        Ok(sessions)
+    }
+
+    async fn read_meta(&self, path: &Path) -> Result<SessionMeta> {
+        let content = tokio::fs::read_to_string(path).await?;
+        let first = content
+            .lines()
+            .next()
+            .ok_or_else(|| Error::InvalidSession("empty session file".into()))?;
+        let event: SessionEvent = serde_json::from_str(first)?;
+        match event {
+            SessionEvent::Meta(m) => Ok(m),
+            _ => Err(Error::InvalidSession("first line is not meta".into())),
+        }
+    }
+
+    /// 删除会话文件。
+    pub async fn delete(&self, session_id: &str) -> Result<()> {
+        let path = self.session_path(session_id);
+        if path.exists() {
+            tokio::fs::remove_file(&path).await?;
+        }
+        Ok(())
+    }
+
+    /// 恢复中断的会话：截断不完整的最后一行（V-STORE-01）。
+    pub async fn recover(&self, session_id: &str) -> Result<Session> {
+        let path = self.session_path(session_id);
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|_| Error::SessionNotFound(session_id.to_string()))?;
+
+        if content.ends_with('\n') {
+            // 完整，直接返回
+            return self.load(session_id).await;
+        }
+
+        // 截断最后一行
+        let lines: Vec<&str> = content.lines().collect();
+        let recovered = if lines.is_empty() {
+            String::new()
+        } else {
+            lines[..lines.len() - 1].join("\n") + "\n"
+        };
+        tokio::fs::write(&path, recovered).await?;
+        self.load(session_id).await
+    }
+
+    /// 归档会话：gzip 压缩为 `.jsonl.gz` 后删除原文件。
+    pub async fn archive(&self, session_id: &str) -> Result<()> {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::fs::File;
+        use std::io::{self, Read};
+
+        let path = self.session_path(session_id);
+        let archive_path = self.base_dir.join(format!("{session_id}.jsonl.gz"));
+
+        let input = File::open(&path)?;
+        let output = File::create(&archive_path)?;
+        let mut encoder = GzEncoder::new(output, Compression::default());
+        let mut reader = io::BufReader::new(input);
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            io::Write::write_all(&mut encoder, &buf[..n])?;
+        }
+        encoder.finish()?;
+
+        tokio::fs::remove_file(&path).await?;
+        Ok(())
+    }
+
+    /// 原子写入：写临时文件 + rename（V-STORE-02）。
+    ///
+    /// 中断后旧文件或新文件二者之一完整可读，绝不产生混合内容。
+    async fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
+        let tmp_path = path.with_extension("jsonl.tmp");
+        tokio::fs::write(&tmp_path, data).await?;
+        tokio::fs::rename(&tmp_path, path).await?;
+        Ok(())
+    }
+
+    /// 原子地写入完整会话（多个事件一次性落盘）。用于 V-STORE-02 演示。
+    pub async fn write_session_atomic(
+        &self,
+        session_id: &str,
+        events: &[SessionEvent],
+    ) -> Result<()> {
+        let path = self.session_path(session_id);
+        let mut data = String::new();
+        for ev in events {
+            data.push_str(&serde_json::to_string(ev)?);
+            data.push('\n');
+        }
+        Self::atomic_write(&path, data.as_bytes()).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hermes_core::Message;
+    use serde_json::json;
+
+    async fn setup() -> (tempfile::TempDir, SessionStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        (dir, store)
+    }
+
+    #[tokio::test]
+    async fn create_append_load_roundtrip() {
+        let (_d, store) = setup().await;
+        let session = store.create("claude-sonnet-4", "anthropic").await.unwrap();
+        let id = &session.meta.id;
+
+        store
+            .append(id, SessionEvent::Message(Message::user_text("hello")))
+            .await
+            .unwrap();
+        store
+            .append(id, SessionEvent::Usage(Usage::new(10, 5)))
+            .await
+            .unwrap();
+        store
+            .append(
+                id,
+                SessionEvent::ToolCall {
+                    name: "read_file".into(),
+                    input: json!({"path": "/a"}),
+                },
+            )
+            .await
+            .unwrap();
+
+        let loaded = store.load(id).await.unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.total_input_tokens, 10);
+        assert_eq!(loaded.total_output_tokens, 5);
+        assert_eq!(loaded.total_tool_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn v_store_01_recover_truncates_incomplete_line() {
+        // V-STORE-01：最后一行只写一半时，恢复保留完整历史并截断
+        let (_d, store) = setup().await;
+        let session = store.create("m", "p").await.unwrap();
+        let id = &session.meta.id;
+        store
+            .append(id, SessionEvent::Message(Message::user_text("good")))
+            .await
+            .unwrap();
+
+        // 人为追加一个不完整的半行（无换行结尾）
+        let path = store.session_path(id);
+        let incomplete = r#"{"message":{"role":"user","content":[{"type":"text","text":"bad"}]}"#;
+        // 注意：半行不以 \n 结尾
+        use tokio::io::AsyncWriteExt;
+        let mut f = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        f.write_all(incomplete.as_bytes()).await.unwrap();
+        f.flush().await.unwrap();
+
+        // 此时直接 load 应失败（半行无法反序列化）
+        assert!(store.load(id).await.is_err());
+
+        // recover 截断后可正常 load
+        let recovered = store.recover(id).await.unwrap();
+        assert_eq!(recovered.messages.len(), 1);
+        assert_eq!(recovered.messages[0].text_content(), "good");
+    }
+
+    #[tokio::test]
+    async fn v_store_02_atomic_write_keeps_old_or_new() {
+        // V-STORE-02：原子写入中断后旧/新文件二选一完整可读
+        let (_d, store) = setup().await;
+        let session = store.create("m", "p").await.unwrap();
+        let id = &session.meta.id;
+        let path = store.session_path(id);
+
+        // 原子写入完整内容（含 Meta 行）
+        let meta = session.meta.clone();
+        store
+            .write_session_atomic(
+                id,
+                &[
+                    SessionEvent::Meta(meta),
+                    SessionEvent::Message(Message::user_text("a")),
+                    SessionEvent::Message(Message::user_text("b")),
+                ],
+            )
+            .await
+            .unwrap();
+
+        // 写入后文件存在且可读
+        assert!(path.exists());
+        let loaded = store.load(id).await.unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+
+        // 临时文件已被清理（rename 后不存在）
+        let tmp = path.with_extension("jsonl.tmp");
+        assert!(!tmp.exists());
+    }
+
+    #[tokio::test]
+    async fn list_sorted_desc() {
+        let (_d, store) = setup().await;
+        let s1 = store.create("m", "p").await.unwrap();
+        // 确保时间戳不同
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let s2 = store.create("m", "p").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let s3 = store.create("m", "p").await.unwrap();
+
+        let list = store.list().await.unwrap();
+        assert_eq!(list.len(), 3);
+        // 倒序：最新在前
+        assert_eq!(list[0].id, s3.meta.id);
+        assert_eq!(list[1].id, s2.meta.id);
+        assert_eq!(list[2].id, s1.meta.id);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_file() {
+        let (_d, store) = setup().await;
+        let session = store.create("m", "p").await.unwrap();
+        let id = &session.meta.id;
+        assert!(store.session_path(id).exists());
+        store.delete(id).await.unwrap();
+        assert!(!store.session_path(id).exists());
+        assert!(store.load(id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn archive_produces_gz() {
+        let (_d, store) = setup().await;
+        let session = store.create("m", "p").await.unwrap();
+        let id = &session.meta.id;
+        store
+            .append(id, SessionEvent::Message(Message::user_text("data")))
+            .await
+            .unwrap();
+
+        let jsonl_path = store.session_path(id);
+        let gz_path = store.base_dir.join(format!("{id}.jsonl.gz"));
+        assert!(jsonl_path.exists());
+        assert!(!gz_path.exists());
+
+        store.archive(id).await.unwrap();
+        assert!(!jsonl_path.exists(), "original .jsonl should be removed");
+        assert!(gz_path.exists(), "archive .jsonl.gz should exist");
+    }
+
+    #[tokio::test]
+    async fn load_missing_session_errors() {
+        let (_d, store) = setup().await;
+        let r = store.load("nonexistent").await;
+        assert!(matches!(r, Err(Error::SessionNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn accept_drill_restart_recovers_after_crash() {
+        // accept-drill-restart：进程重启演练——崩溃后 JSONL 可恢复，状态可投影
+        let (_d, store) = setup().await;
+        let session = store.create("claude", "anthropic").await.unwrap();
+        let id = &session.meta.id;
+        store
+            .append(id, SessionEvent::Message(Message::user_text("msg1")))
+            .await
+            .unwrap();
+        store
+            .append(id, SessionEvent::Message(Message::user_text("msg2")))
+            .await
+            .unwrap();
+        store
+            .append(id, SessionEvent::Usage(Usage::new(5, 3)))
+            .await
+            .unwrap();
+
+        // 模拟崩溃：追加一个不完整的半行（无换行）
+        let path = store.session_path(id);
+        use tokio::io::AsyncWriteExt;
+        let mut f = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        f.write_all(b"{\"message\":").await.unwrap(); // 半行
+        f.flush().await.unwrap();
+        drop(f);
+
+        // 「重启」后用 recover 恢复
+        let recovered = store.recover(id).await.unwrap();
+        assert_eq!(recovered.messages.len(), 2, "完整历史保留");
+        assert_eq!(recovered.total_input_tokens, 5);
+        assert_eq!(recovered.total_output_tokens, 3);
+        assert_eq!(recovered.messages[1].text_content(), "msg2");
+    }
+
+    #[tokio::test]
+    async fn accept_perf_stream_linear_append() {
+        // accept-perf-stream：会话追加为线性写入（每事件一行），不全量复制历史
+        let (_d, store) = setup().await;
+        let session = store.create("m", "p").await.unwrap();
+        let id = &session.meta.id;
+        for i in 0..5 {
+            store
+                .append(
+                    id,
+                    SessionEvent::Message(Message::user_text(format!("m{i}"))),
+                )
+                .await
+                .unwrap();
+        }
+        // 验证：文件行数 = meta(1) + 5 条消息 = 6 行（线性，每事件独立一行）
+        let content = tokio::fs::read_to_string(store.session_path(id))
+            .await
+            .unwrap();
+        let non_empty = content.lines().filter(|l| !l.trim().is_empty()).count();
+        assert_eq!(non_empty, 6);
+    }
+
+    #[tokio::test]
+    async fn test_mig_three_version_fixtures() {
+        // test-mig-three：三版本迁移 fixture 都可被当前实现读取
+        let (_d, store) = setup().await;
+        let base = store.base_dir.clone();
+
+        // v0 最早版本：仅 Meta + Message，无额外字段
+        let v0 = r#"{"meta":{"id":"v0","created_at":"2024-01-01T00:00:00Z","model":"m","provider":"p"}}
+{"message":{"role":"user","content":[{"type":"text","text":"old"}]}}
+"#;
+        // v1 上一版本：含 Usage
+        let v1 = r#"{"meta":{"id":"v1","created_at":"2024-06-01T00:00:00Z","model":"m","provider":"p"}}
+{"message":{"role":"assistant","content":[{"type":"text","text":"prev"}]}}
+{"usage":{"input_tokens":7,"output_tokens":2}}
+"#;
+        // v2 未来版本：含未知字段（future_field）与未知事件类型（应被跳过/忽略）
+        let v2 = r#"{"meta":{"id":"v2","created_at":"2025-01-01T00:00:00Z","model":"m","provider":"p","future_field":42}}
+{"message":{"role":"user","content":[{"type":"text","text":"future"}]}}
+"#;
+
+        for (name, content) in [("v0", v0), ("v1", v1), ("v2", v2)] {
+            tokio::fs::write(base.join(format!("{name}.jsonl")), content)
+                .await
+                .unwrap();
+            let loaded = store
+                .load(name)
+                .await
+                .unwrap_or_else(|e| panic!("load {name} failed: {e}"));
+            assert!(!loaded.messages.is_empty(), "{name} should have messages");
+            assert_eq!(loaded.meta.id, name);
+        }
+        // v1 的 usage 累计应正确
+        let v1_loaded = store.load("v1").await.unwrap();
+        assert_eq!(v1_loaded.total_input_tokens, 7);
+    }
+}

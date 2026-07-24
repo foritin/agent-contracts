@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hermes-error",
+    "crates/hermes-core",
+    "crates/hermes-llm",
+    "crates/hermes-mcp",
+    "crates/hermes-store",
+    "crates/hermes-config",
+    "crates/hermes-compaction",
+    "crates/hermes-ipc",
+    "crates/hermes-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/charter/agent-core"
+authors = ["Charter & Tiny Hermes shared team"]
+
+[workspace.dependencies]
+# 异步运行时
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+futures = "0.3"
+async-trait = "0.1"
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+
+# 错误与日志
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 通用工具
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+bytes = "1"
+dirs = "5"
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# 内部 crate（workspace 别名）
+hermes-error = { path = "crates/hermes-error" }
+hermes-core = { path = "crates/hermes-core" }
+hermes-llm = { path = "crates/hermes-llm" }
+hermes-mcp = { path = "crates/hermes-mcp" }
+hermes-store = { path = "crates/hermes-store" }
+hermes-config = { path = "crates/hermes-config" }
+hermes-compaction = { path = "crates/hermes-compaction" }
+hermes-ipc = { path = "crates/hermes-ipc" }
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

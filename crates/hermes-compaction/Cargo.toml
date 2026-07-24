@@ -1,0 +1,22 @@
+[package]
+name = "hermes-compaction"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Context compaction strategies: sliding window, LLM summary, smart selection"
+
+[dependencies]
+hermes-core = { workspace = true }
+hermes-error = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

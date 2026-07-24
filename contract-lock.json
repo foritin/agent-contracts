@@ -1,0 +1,27 @@
+{
+  "publicContract": "v0.1.0",
+  "commit": "<immutable-commit: pinned-by-charter-and-hermes>",
+  "crates": [
+    "hermes-error",
+    "hermes-core",
+    "hermes-llm",
+    "hermes-mcp",
+    "hermes-store",
+    "hermes-config",
+    "hermes-compaction",
+    "hermes-ipc",
+    "hermes-tauri"
+  ],
+  "validatedBy": {
+    "agentCore": "cargo test --workspace",
+    "charter": "cargo test -p charter-contract-tests",
+    "tinyHermes": "cargo test -p hermes-contract-tests"
+  },
+  "qualityGates": {
+    "fmt": "cargo fmt --all -- --check",
+    "clippy": "cargo clippy --workspace --all-targets -- -D warnings",
+    "doc": "cargo doc --no-deps --workspace",
+    "test": "cargo test --workspace"
+  },
+  "versionPolicy": "Semver: patch=wording/examples; minor=optional fields/methods/events; major=remove/rename/default-permission/event-order change"
+}

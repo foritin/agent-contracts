@@ -1,0 +1,256 @@
+//! 消息与内容块类型。
+//!
+//! 参见 `04-message-types.html`。设计参考 Anthropic Messages API（最表达力），
+//! 其他 Provider 向下兼容。`Role` 只有 `User` / `Assistant`；系统提示不是消息
+//! 角色，而是 `CompletionRequest.system` 的独立顶层字段（与 Anthropic API 一致）。
+//! Provider 适配层负责转 OpenAI 的 `system` role。
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// 消息角色。只有 User / Assistant 两种。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    User,
+    Assistant,
+}
+
+/// 一条消息：角色 + 内容块列表。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub role: Role,
+    pub content: Vec<ContentBlock>,
+}
+
+impl Message {
+    /// 构造仅含文本的 User 消息。
+    pub fn user_text(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    /// 构造仅含文本的 Assistant 消息。
+    pub fn assistant_text(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    /// 注入的「系统级」上下文备注（如压缩摘要 / 占位符）。
+    ///
+    /// **设计说明**：`Role` 契约只有 User / Assistant（见 04 篇）。压缩等模块
+    /// 需要向消息流注入上下文备注，这里以 Assistant 角色承载（视作助手提供的
+    /// 背景信息），避免破坏 Role 契约。Provider 适配层可将其折叠进 system
+    /// 字段或保留为 assistant 消息。
+    pub fn system_text(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    /// 拼接所有文本块。
+    pub fn text_content(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|b| b.as_text())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    /// 返回所有 `ToolUse` 块的引用。
+    pub fn tool_uses(&self) -> Vec<&ContentBlock> {
+        self.content.iter().filter(|b| b.is_tool_use()).collect()
+    }
+
+    /// 粗略 token 估算（len / 4），用于压缩触发判定，非精确计数。
+    pub fn estimate_tokens(&self) -> u32 {
+        let mut tokens = 0u32;
+        for block in &self.content {
+            tokens += block.estimate_tokens();
+        }
+        tokens
+    }
+
+    /// 推入一个内容块。
+    pub fn push_block(&mut self, block: ContentBlock) {
+        self.content.push(block);
+    }
+}
+
+/// 内容块。参考 Anthropic 内容块结构，仅保留 LLM 协议级别的通用类型；
+/// 产品专属扩展通过 `Custom` 钩子携带，公共层不解释其语义。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    /// 纯文本。
+    Text { text: String },
+
+    /// 思考过程（Claude extended thinking）。
+    Thinking {
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+
+    /// 工具调用请求。
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+
+    /// 工具调用结果。
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(default)]
+        is_error: bool,
+    },
+
+    /// 图像。
+    Image { source: ImageSource },
+
+    /// 产品层扩展块（如文件引用、选区引用等）。公共层不解释其语义，
+    /// 仅保证可序列化与透传；Provider 适配层将其降级为占位文本。
+    Custom {
+        /// 扩展类型名，由产品层定义（如 "file_ref"、"selection_ref"）。
+        type_name: String,
+        /// 不透明载荷。
+        data: Value,
+    },
+}
+
+impl ContentBlock {
+    /// 若为文本块，返回文本引用。
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            ContentBlock::Text { text } => Some(text),
+            _ => None,
+        }
+    }
+
+    /// 是否为工具调用块。
+    pub fn is_tool_use(&self) -> bool {
+        matches!(self, ContentBlock::ToolUse { .. })
+    }
+
+    /// 是否为工具结果块。
+    pub fn is_tool_result(&self) -> bool {
+        matches!(self, ContentBlock::ToolResult { .. })
+    }
+
+    /// 工具调用的名称。
+    pub fn tool_name(&self) -> Option<&str> {
+        match self {
+            ContentBlock::ToolUse { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// 工具调用的 id。
+    pub fn tool_id(&self) -> Option<&str> {
+        match self {
+            ContentBlock::ToolUse { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+
+    /// 工具结果对应的 tool_use_id。
+    pub fn tool_use_id(&self) -> Option<&str> {
+        match self {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id),
+            _ => None,
+        }
+    }
+
+    /// 粗略 token 估算。
+    pub fn estimate_tokens(&self) -> u32 {
+        match self {
+            ContentBlock::Text { text } => (text.len() / 4) as u32,
+            ContentBlock::Thinking { thinking, .. } => (thinking.len() / 4) as u32,
+            ContentBlock::ToolUse { input, .. } => (input.to_string().len() / 4) as u32,
+            ContentBlock::ToolResult { content, .. } => (content.len() / 4) as u32,
+            _ => 10,
+        }
+    }
+
+    /// 构造一个 `is_error=true` 的已取消工具结果（用于取消配对，见 V-MSG-03）。
+    pub fn cancelled_tool_result(tool_use_id: impl Into<String>) -> Self {
+        ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.into(),
+            content: "[cancelled]".to_string(),
+            is_error: true,
+        }
+    }
+}
+
+/// 图像来源。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageSource {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub media_type: String,
+    pub data: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_text_constructor() {
+        let m = Message::user_text("hello");
+        assert_eq!(m.role, Role::User);
+        assert_eq!(m.text_content(), "hello");
+    }
+
+    #[test]
+    fn content_block_text_roundtrip() {
+        let block = ContentBlock::Text { text: "hi".into() };
+        let json = serde_json::to_string(&block).unwrap();
+        // tag = "text"
+        assert!(json.contains(r#""type":"text""#));
+        let back: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.as_text(), Some("hi"));
+    }
+
+    #[test]
+    fn tool_use_tagged_serde() {
+        let block = ContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "read_file".into(),
+            input: serde_json::json!({"path": "/a"}),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains(r#""type":"tool_use""#));
+        let back: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tool_name(), Some("read_file"));
+        assert_eq!(back.tool_id(), Some("t1"));
+    }
+
+    #[test]
+    fn unknown_field_ignored() {
+        // 未来版本可能新增字段，旧实现读取时应忽略未知键。
+        let json = r#"{"type":"text","text":"x","future_field":123}"#;
+        let block: ContentBlock = serde_json::from_str(json).unwrap();
+        assert_eq!(block.as_text(), Some("x"));
+    }
+
+    #[test]
+    fn cancelled_tool_result_is_error() {
+        let r = ContentBlock::cancelled_tool_result("t1");
+        assert!(matches!(r, ContentBlock::ToolResult { is_error: true, .. }));
+        assert_eq!(r.tool_use_id(), Some("t1"));
+    }
+
+    #[test]
+    fn estimate_tokens_nonzero() {
+        let m = Message::user_text("a fairly long piece of text for estimation");
+        assert!(m.estimate_tokens() > 0);
+    }
+}

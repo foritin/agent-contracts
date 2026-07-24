@@ -67,18 +67,12 @@ pub enum ContentBlock {
         source: ImageSource,
     },
     
-    /// R-Code（Charter）特有：文件引用
-    FileRef {
-        path: String,
-        is_folder: bool,
-    },
-    
-    /// R-Code（Charter）特有：代码选区
-    SelectionRef {
-        path: String,
-        start_line: u32,
-        end_line: u32,
-        hash: String,
+    /// 产品层扩展块（公共层不解释语义，仅保证透传）
+    /// 例如 Charter 可用 type_name="file_ref" / "selection_ref"，
+    /// Hermes 可用 type_name="im_card" 等。Provider 适配层降级为占位文本。
+    Custom {
+        type_name: String,
+        data: Value,
     },
 }
 

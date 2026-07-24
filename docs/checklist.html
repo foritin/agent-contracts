@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Agent Core 开发对照清单 · agent-core</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f7f4;
+      --surface: #ffffff;
+      --surface-2: #fbfbf9;
+      --ink: #18201c;
+      --muted: #5f6c64;
+      --line: #d9ded9;
+      --accent: #0c6c4b;
+      --accent-soft: #e5f3ec;
+      --code: #11231b;
+      --code-ink: #e6f5ec;
+      --warning: #9a5d00;
+      --warning-bg: #fff4d7;
+      --danger: #b42318;
+      --danger-soft: #fdecea;
+      --parallel: #1d6fb8;
+      --parallel-soft: #e7f1fb;
+      --serial: #7a4fb8;
+      --serial-soft: #f1ebfb;
+      --shadow: 0 16px 50px rgba(28, 40, 33, .09);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111714;
+        --surface: #18211c;
+        --surface-2: #141b17;
+        --ink: #e4ebe6;
+        --muted: #a6b3ab;
+        --line: #334238;
+        --accent: #64d6a3;
+        --accent-soft: #173b2a;
+        --code: #0a0f0c;
+        --code-ink: #daf4e6;
+        --warning: #ffd17a;
+        --warning-bg: #4b3916;
+        --danger: #ff8a7a;
+        --danger-soft: #3a1c18;
+        --parallel: #6fb8e8;
+        --parallel-soft: #14283a;
+        --serial: #b89aff;
+        --serial-soft: #241a3a;
+        --shadow: 0 16px 50px rgba(0, 0, 0, .28);
+      }
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.72 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    a { color: var(--accent); text-underline-offset: .18em; }
+
+    .site-header { border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 90%, transparent); position: sticky; top: 0; z-index: 20; backdrop-filter: blur(14px); }
+    .site-header__inner { width: min(1200px, calc(100% - 32px)); margin: 0 auto; display: flex; gap: 16px; align-items: center; min-height: 58px; flex-wrap: wrap; }
+    .brand { color: var(--ink); font-weight: 750; text-decoration: none; white-space: nowrap; }
+    .site-nav { display: flex; gap: 6px 12px; font-size: .88rem; }
+    .site-nav a { color: var(--muted); text-decoration: none; }
+    .site-nav a[aria-current="page"] { color: var(--accent); font-weight: 700; }
+
+    .wrap { width: min(1200px, calc(100% - 32px)); margin: 24px auto 64px; }
+
+    .hero { background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: clamp(24px, 5vw, 48px); box-shadow: var(--shadow); margin-bottom: 28px; }
+    .hero h1 { font-size: clamp(1.7rem, 4vw, 2.6rem); letter-spacing: -.03em; margin: 0 0 .4em; line-height: 1.2; }
+    .hero p { color: var(--muted); margin: .3em 0; }
+    .hero .legend { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 1.2rem; font-size: .9rem; }
+    .legend span { display: inline-flex; align-items: center; gap: .35rem; }
+    .tag { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .76rem; font-weight: 700; border: 1px solid transparent; }
+    .tag--parallel { background: var(--parallel-soft); color: var(--parallel); border-color: color-mix(in srgb, var(--parallel) 30%, transparent); }
+    .tag--serial { background: var(--serial-soft); color: var(--serial); border-color: color-mix(in srgb, var(--serial) 30%, transparent); }
+    .tag--gate { background: var(--warning-bg); color: var(--warning); border-color: color-mix(in srgb, var(--warning) 30%, transparent); }
+    .tag--p { background: var(--accent-soft); color: var(--accent); }
+
+    .progress-bar { height: 12px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; overflow: hidden; margin-top: 1rem; }
+    .progress-bar__fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 60%, var(--parallel))); transition: width .4s ease; }
+    .progress-stats { display: flex; flex-wrap: wrap; gap: 14px 26px; margin-top: .8rem; font-size: .9rem; color: var(--muted); }
+    .progress-stats b { color: var(--ink); }
+
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 18px; }
+    .toolbar button, .toolbar select { font: inherit; padding: .42rem .8rem; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); cursor: pointer; }
+    .toolbar button:hover { border-color: var(--accent); color: var(--accent); }
+    .toolbar .spacer { flex: 1; }
+
+    .phase { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); margin-bottom: 24px; overflow: hidden; }
+    .phase > summary { list-style: none; cursor: pointer; padding: 20px 24px; display: flex; align-items: center; gap: 14px; }
+    .phase > summary::-webkit-details-marker { display: none; }
+    .phase > summary h2 { margin: 0; font-size: 1.3rem; border: 0; padding: 0; flex: 1; }
+    .phase .chev { color: var(--muted); transition: transform .2s; }
+    .phase[open] > summary .chev { transform: rotate(90deg); }
+    .phase__body { padding: 0 24px 24px; }
+
+    .group { margin: 1.4rem 0; }
+    .group > h3 { font-size: 1.08rem; margin: 1.2em 0 .5em; display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+    .group > h3 .count { color: var(--muted); font-size: .85rem; font-weight: 500; }
+    .group > p.note { color: var(--muted); font-size: .92rem; margin: .2em 0 .8em; }
+
+    .task { display: flex; gap: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; margin: 8px 0; background: var(--surface-2); transition: border-color .15s, background .15s; align-items: flex-start; }
+    .task:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+    .task.done { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+    .task.done .task__label { color: var(--muted); }
+    .task input[type="checkbox"] { width: 18px; height: 18px; margin-top: .18em; accent-color: var(--accent); cursor: pointer; flex-shrink: 0; }
+    .task__main { flex: 1; min-width: 0; }
+    .task__label { font-weight: 600; }
+    .task__meta { margin-top: .2em; font-size: .86rem; color: var(--muted); }
+    .task__meta code { font-size: .85em; }
+    .task__tags { display: inline-flex; gap: 6px; flex-wrap: wrap; margin-right: 4px; }
+    .task .vec { font-family: ui-monospace, monospace; font-size: .78rem; background: var(--danger-soft); color: var(--danger); padding: .05rem .4rem; border-radius: 5px; font-weight: 700; }
+
+    .deps { font-family: ui-monospace, monospace; font-size: .82rem; color: var(--muted); margin: .3em 0 .6em; }
+    .deps b { color: var(--ink); font-family: inherit; }
+
+    .gate { border-left: 4px solid var(--warning); background: var(--warning-bg); border-radius: 0 10px 10px 0; padding: 14px 16px; margin: 14px 0; }
+    .gate h4 { margin: 0 0 .3em; font-size: 1rem; color: var(--warning); }
+    .gate p { margin: .2em 0; font-size: .9rem; }
+
+    .diagram { background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin: 18px 0; overflow-x: auto; }
+    .diagram pre { margin: 0; background: transparent; color: var(--ink); font-size: .82rem; line-height: 1.45; }
+
+    table { width: 100%; border-collapse: collapse; display: block; overflow-x: auto; margin: 1rem 0; font-size: .9rem; }
+    th, td { border: 1px solid var(--line); padding: .5rem .65rem; text-align: left; vertical-align: top; }
+    th { background: color-mix(in srgb, var(--accent-soft) 66%, var(--surface)); font-weight: 720; }
+
+    .footer { color: var(--muted); font-size: .84rem; text-align: center; margin: 24px 0; }
+    .footer a { color: var(--muted); }
+    @media (max-width: 720px) { .phase > summary { padding: 16px; } .phase__body { padding: 0 16px 18px; } .task { padding: 10px; } }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="index.html">agent-core</a>
+      <nav class="site-nav" aria-label="导航">
+        <a href="index.html">文档总览</a>
+        <a href="14-common-quality-gates.html">质量门禁</a>
+        <a href="#" aria-current="page">开发清单</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <h1>Agent Core 开发对照清单</h1>
+      <p>基于 <code>00-overview</code>～<code>15-document-boundary</code> 全部规范生成。覆盖实施步骤（并行 / 串行）、可验证步骤（单元 / 集成 / 契约测试）与验收标准。</p>
+      <p>勾选状态自动保存到本地（localStorage），可离线使用、可打印。</p>
+      <blockquote style="margin-top:1.2rem;padding:.8rem 1rem;border-left:4px solid var(--accent);background:var(--accent-soft);border-radius:0 10px 10px 0;font-size:.92rem;"><b>范围边界</b>：agent-core 是<b>公共层</b>，只交付稳定合同（trait / DTO / 错误）与公共侧测试。产品专属类型走 <code>Custom</code> 扩展钩子（不硬编码进公共枚举）；产品专属实现（网关桥接、Tauri 命令、双消费者契约测试、发布签核）属下游产品仓库职责，不在本清单勾选范围。</blockquote>
+      <div class="legend">
+        <span><span class="tag tag--parallel">并行</span>无相互依赖，可多人同时推进</span>
+        <span><span class="tag tag--serial">串行</span>存在前置依赖，必须按序</span>
+        <span><span class="tag tag--gate">阶段门</span>未通过禁止进入下一阶段</span>
+        <span><span class="tag tag--p">P0–P5</span>采用顺序</span>
+      </div>
+      <div class="progress-bar"><div class="progress-bar__fill" id="globalFill"></div></div>
+      <div class="progress-stats" id="globalStats"></div>
+    </section>
+
+    <div class="toolbar">
+      <button data-act="expand">全部展开</button>
+      <button data-act="collapse">全部收起</button>
+      <button data-act="reset">清空勾选</button>
+      <span class="spacer"></span>
+      <button data-act="print">打印 / 导出 PDF</button>
+    </div>
+
+    <div class="diagram">
+      <pre>依赖与并行关系总览（→ 串行依赖，∥ 可并行）
+                            ┌─ hermes-error ─┐
+ P0 基础层  ────────────── ∥  hermes-core DTO │  (无依赖，三者并行启动)
+        │                  └─────────────────┘
+        ▼ (Message/Role 冻结)
+ P1 Provider ── trait 冻结 ──┬─∥ AnthropicProvider
+                              ├─∥ OpenAiProvider
+                              ├─∥ DeepSeekProvider
+                              └─∥ MockProvider(测试)
+        ▼ (Provider trait 可用)
+ P2 ToolHost/MCP ── trait 冻结 ──┬─∥ NullToolHost / CompositeToolHost
+        │                         ├─∥ MCP stdio 传输
+        │                         ├─∥ MCP HTTP 传输
+        │                         └── McpToolHost 聚合(依赖 server)
+        ▼ (hermes-error 就绪)
+ P3 配置/存储/压缩 ──┬─∥ hermes-config(依赖 error)
+                     ├─∥ SessionStore JSONL
+                     ├─∥ recover/archive
+                     └─∥ CompactionStrategy ×3(滑动窗口/LLM摘要/智能)
+        ▼ (P0–P3 全部就绪)
+ P4 IPC/Tauri(仅需要者) ──┬─∥ IpcServer/Client(Unix/NamedPipe)
+                          └─∥ Tauri AppState + commands
+        ▼
+ P5 集成与发布 ── workspace/submodule/contract-lock/双端签核</pre>
+    </div>
+
+    <!-- ===================== 实施步骤 ===================== -->
+    <h2 style="font-size:1.5rem;border-bottom:1px solid var(--line);padding-bottom:.3em;margin-top:1.6em;">一、实施步骤（并行 / 串行）</h2>
+
+    <!-- P0 -->
+    <details class="phase" open data-phase="P0">
+      <summary><span class="chev">▶</span><h2><span class="tag tag--p">P0</span> 基础类型与错误层（地基）</h2><span class="count" data-count></span></summary>
+      <div class="phase__body">
+        <p class="note"><b>串行前置</b>：无（起点）。<b>可并行</b>：<code>hermes-error</code>、<code>hermes-core</code> 的 Message / Session DTO 三者无相互依赖，可同时启动。<b>来源</b>：04-message-types、07-error-handling、02-session-management。</p>
+        <div class="group" data-group="impl-p0">
+          <h3>0.1 工作区骨架 <span class="tag tag--serial">串行</span> <span class="count"></span></h3>
+          <div class="task"><input type="checkbox" data-id="impl-p0-skeleton" checked><div class="task__main"><div class="task__label">创建 <code>agent-core/Cargo.toml</code> workspace（resolver="2"），登记成员 crate</div><div class="task__meta">对应 <code>11-crate-mapping</code> 工作区结构；先空壳后填充</div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p0-ci" checked><div class="task__main"><div class="task__label">建立 CI 基线：<code>cargo fmt --check</code> / <code>cargo clippy -D warnings</code> / <code>cargo test</code></div><div class="task__meta">静态质量门先行，见 14 篇「静态」层</div></div></div>
+        </div>
+        <div class="group" data-group="impl-p0">
+          <h3>0.2 hermes-error <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：无</div>
+          <div class="task"><input type="checkbox" data-id="impl-p0-error-enum" checked><div class="task__main"><div class="task__label">定义统一 <code>Error</code> 枚举（thiserror），覆盖会话/Provider/工具/MCP/配置/存储/序列化/IPC/压缩等类别</div><div class="task__meta"><code>07-error-handling §2</code>；含 <code>#[from]</code> 转换 io/json/yaml/toml</div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p0-error-ctx" checked><div class="task__main"><div class="task__label">实现 <code>ErrorContext</code> + <code>ResultExt</code>（with_session / with_tool）携带上下文</div><div class="task__meta"><code>07 §3</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p0-error-recovery" checked><div class="task__main"><div class="task__label">编写错误恢复策略映射表（RateLimited 退避 / McpNotConnected 重连 等）</div><div class="task__meta"><code>07 §4</code>；仅文档化策略，实现分散到各模块</div></div></div>
+        </div>
+        <div class="group" data-group="impl-p0">
+          <h3>0.3 hermes-core：消息类型 <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：无</div>
+          <div class="task"><input type="checkbox" data-id="impl-p0-role" checked><div class="task__main"><div class="task__label"><code>Role</code> 仅 User / Assistant；system 不作为角色，置于 <code>CompletionRequest.system</code></div><div class="task__meta"><code>04 §2</code>；与 Anthropic API 一致，Provider 适配层负责转 OpenAI system role</div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p0-contentblock" checked><div class="task__main"><div class="task__label"><code>ContentBlock</code> 枚举：Text / Thinking / ToolUse / ToolResult / Image / Custom（产品扩展钩子，不含产品专属类型）</div><div class="task__meta"><code>04 §3</code>；<code>#[serde(tag="type", rename_all="snake_case")]</code>；产品专属块走 Custom 透传</div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p0-msg-helpers" checked><div class="task__main"><div class="task__label">实现 Message / ContentBlock 工具方法：user_text、assistant_text、as_text、is_tool_use、tool_name、tool_id、text_content、tool_uses、estimate_tokens</div><div class="task__meta"><code>04 §4 §6</code>；token 估算 len/4</div></div></div>
+        </div>
+        <div class="group" data-group="impl-p0">
+          <h3>0.4 hermes-core：会话数据模型 <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：Message 类型（0.3）</div>
+          <div class="task"><input type="checkbox" data-id="impl-p0-sessionmeta" checked><div class="task__main"><div class="task__label"><code>SessionMeta</code>（id/created_at/model/provider/title）作为 JSONL 第一行</div><div class="task__meta"><code>02 §2</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p0-sessionevent" checked><div class="task__main"><div class="task__label"><code>SessionEvent</code> tagged enum：Meta / Message / Usage / ToolCall / ToolResult / System</div><div class="task__meta"><code>02 §2</code>；注意 <code>12-api-contracts §2.2</code> 中 ToolResult 含 is_error 字段</div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p0-session-struct" checked><div class="task__main"><div class="task__label"><code>Session</code> 内存视图 + <code>SessionStatus</code>（Active/Paused/Completed/Archived/Error）</div><div class="task__meta"><code>02 §2</code></div></div></div>
+        </div>
+        <div class="gate"><h4>P0 阶段门（必须全绿方可进入 P1）</h4><p>serde 往返通过；未知字段策略有测试；JSONL 含坏尾行仍可读取。</p></div>
+      </div>
+    </details>
+
+    <!-- P1 -->
+    <details class="phase" data-phase="P1">
+      <summary><span class="chev">▶</span><h2><span class="tag tag--p">P1</span> LLM Provider 抽象与实现</h2><span class="count" data-count></span></summary>
+      <div class="phase__body">
+        <p class="note"><b>串行前置</b>：P0 的 Message/ContentBlock 冻结。<b>可并行</b>：trait 冻结后，四个 Provider 实现并行。<b>来源</b>：01-llm-provider、12-api-contracts §1。</p>
+        <div class="group" data-group="impl-p1">
+          <h3>1.1 Provider trait 与 DTO <span class="tag tag--serial">串行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：hermes-core Message</div>
+          <div class="task"><input type="checkbox" data-id="impl-p1-trait" checked><div class="task__main"><div class="task__label"><code>LlmProvider</code> trait：complete / stream / capabilities / name（async_trait, Send+Sync）</div><div class="task__meta"><code>01 §2</code>、<code>12 §1.1</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p1-dto" checked><div class="task__main"><div class="task__label">定义 CompletionRequest / CompletionResponse / StreamEvent / StopReason / Usage</div><div class="task__meta"><code>01 §3</code>；StreamEvent 含 TextDelta/ToolUseStart/ToolUseDelta/ToolUseComplete/Stop/Usage</div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p1-cap" checked><div class="task__main"><div class="task__label"><code>Capabilities</code> 能力协商（streaming/tool_use/vision/prompt_caching/max_context_tokens）+ can_use_tools / cache_key</div><div class="task__meta"><code>01 §6</code></div></div></div>
+        </div>
+        <div class="group" data-group="impl-p1">
+          <h3>1.2 Provider 实现 <span class="tag tag--parallel">并行</span>（trait 冻结后） <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：LlmProvider trait（1.1）</div>
+          <div class="task"><input type="checkbox" data-id="impl-p1-anthropic" checked><div class="task__main"><div class="task__label"><code>AnthropicProvider</code>：Messages API 转换、流式解析、prompt caching（cache_control ephemeral）</div><div class="task__meta"><code>01 §4.1 §7</code>；max_context 200k</div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p1-openai" checked><div class="task__main"><div class="task__label"><code>OpenAiProvider</code>：Chat Completions 转换、system role 适配、不支持 prompt caching</div><div class="task__meta"><code>01 §4.2</code>；max_context 128k</div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p1-deepseek" checked><div class="task__main"><div class="task__label"><code>DeepSeekProvider</code>：复用 OpenAiProvider，base_url 指向 deepseek</div><div class="task__meta"><code>01 §4.3</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p1-mock" checked><div class="task__main"><div class="task__label"><code>MockProvider</code>：可录制/回放流式事件，用于无网络测试</div><div class="task__meta"><code>14 §3</code>；至少一个真实 + 一个 mock 通过流式契约</div></div></div>
+        </div>
+        <div class="group" data-group="impl-p1">
+          <h3>1.3 工厂与组装 <span class="tag tag--serial">串行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：1.2 全部实现</div>
+          <div class="task"><input type="checkbox" data-id="impl-p1-factory" checked><div class="task__main"><div class="task__label"><code>ProviderConfig</code> 枚举 + <code>create_provider</code> 工厂返回 <code>Box&lt;dyn LlmProvider&gt;</code></div><div class="task__meta"><code>01 §5</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p1-adapter" checked><div class="task__main"><div class="task__label">Message → AnthropicMessage 适配（<code>From&lt;&amp;Message&gt;</code>），不支持的 ContentBlock 降级为占位文本</div><div class="task__meta"><code>04 §5</code></div></div></div>
+        </div>
+        <div class="gate"><h4>P1 阶段门</h4><p>流式文本 / 工具调用 / 取消 / usage 事件可录制；不可恢复错误流终结且不泄露 API key。</p></div>
+      </div>
+    </details>
+
+    <!-- P2 -->
+    <details class="phase" data-phase="P2">
+      <summary><span class="chev">▶</span><h2><span class="tag tag--p">P2</span> ToolHost 与 MCP 客户端</h2><span class="count" data-count></span></summary>
+      <div class="phase__body">
+        <p class="note"><b>串行前置</b>：P0。<b>可并行</b>：trait 冻结后，stdio / HTTP 传输并行。<b>来源</b>：03-tool-host、05-mcp-client、12 §3 §4。</p>
+        <div class="group" data-group="impl-p2">
+          <h3>2.1 ToolHost 抽象 <span class="tag tag--serial">串行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：hermes-core</div>
+          <div class="task"><input type="checkbox" data-id="impl-p2-trait" checked><div class="task__main"><div class="task__label"><code>ToolHost</code> trait：list_tools / call / call_batch（默认串行实现）</div><div class="task__meta"><code>03 §2</code>、<code>12 §3.1</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p2-spec" checked><div class="task__main"><div class="task__label"><code>ToolSpec</code>（name/description/input_schema/source/requires_confirmation）+ <code>ToolSource</code> + <code>ToolCallOutcome</code></div><div class="task__meta"><code>03 §2</code>；<code>requires_confirmation</code> 默认 true（14 篇兼容性表）</div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p2-null-composite" checked><div class="task__main"><div class="task__label">实现 <code>NullToolHost</code>（空实现，拒绝调用）与 <code>CompositeToolHost</code>（按优先级查找）</div><div class="task__meta"><code>03 §3 §6</code></div></div></div>
+        </div>
+        <div class="group" data-group="impl-p2">
+          <h3>2.2 MCP 配置与连接 <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：ToolHost trait（2.1）</div>
+          <div class="task"><input type="checkbox" data-id="impl-p2-serverconfig" checked><div class="task__main"><div class="task__label"><code>ServerSpec</code>（Stdio / Http tagged enum）+ <code>McpConfig::load / load_default</code></div><div class="task__meta"><code>05 §2 §3</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p2-stdio" checked><div class="task__main"><div class="task__label">MCP stdio 子进程传输：ChildProcessTransport + initialize + refresh_tools</div><div class="task__meta"><code>05 §4</code>；子进程退出需返回可诊断错误</div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p2-http" checked><div class="task__main"><div class="task__label">MCP Streamable HTTP 传输：HttpTransport，超时/非2xx/非法JSON 映射稳定错误类别</div><div class="task__meta"><code>05 §4</code>、<code>14 V-TOOL-04</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p2-mcpserver" checked><div class="task__main"><div class="task__label"><code>McpServer</code>：connect / disconnect / list_tools / call_tool / health_check</div><div class="task__meta"><code>12 §4.2</code></div></div></div>
+        </div>
+        <div class="group" data-group="impl-p2">
+          <h3>2.3 MCP 聚合层 <span class="tag tag--serial">串行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：McpServer（2.2）</div>
+          <div class="task"><input type="checkbox" data-id="impl-p2-mcphost" checked><div class="task__main"><div class="task__label"><code>McpToolHost</code>：from_config / connect_all / 缓存（RwLock）失效策略 / <code>server__tool</code> 命名路由</div><div class="task__meta"><code>05 §5</code>、<code>03 §4</code>；add_server 后清空缓存</div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p2-mcperror" checked><div class="task__main"><div class="task__label"><code>McpError</code> 枚举：NotConnected / ServerNotFound / ToolNotFound / InvalidToolName / CallFailed / Config</div><div class="task__meta"><code>05 §6</code></div></div></div>
+        </div>
+        <div class="gate"><h4>P2 阶段门</h4><p>工具命名不碰撞；失败默认拒绝/确认；MCP stdio 与 HTTP 断开/超时可恢复。</p></div>
+      </div>
+    </details>
+
+    <!-- P3 -->
+    <details class="phase" data-phase="P3">
+      <summary><span class="chev">▶</span><h2><span class="tag tag--p">P3</span> 配置 / 存储 / 压缩</h2><span class="count" data-count></span></summary>
+      <div class="phase__body">
+        <p class="note"><b>串行前置</b>：hermes-error 就绪（config 依赖）。<b>可并行</b>：config / store / compaction 三线并行。<b>来源</b>：08-config、02-session、06-compaction。</p>
+        <div class="group" data-group="impl-p3">
+          <h3>3.1 hermes-config <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：hermes-error</div>
+          <div class="task"><input type="checkbox" data-id="impl-p3-struct" checked><div class="task__main"><div class="task__label"><code>Config</code> 结构：default_provider/log_level/providers/mcp_servers/storage/compaction/tauri</div><div class="task__meta"><code>08 §3</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p3-load" checked><div class="task__main"><div class="task__label"><code>load()</code> 优先级链：默认值 &lt; 文件 &lt; 环境变量 &lt; 显式参数；<code>validate()</code> 校验默认 provider / api_key 非空 / 存储目录可写</div><div class="task__meta"><code>08 §4</code>、<code>14 V-CFG-01</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p3-defaults" checked><div class="task__main"><div class="task__label">默认值函数：provider=anthropic / log=info / compaction=auto / max_context=180000 / trigger=0.8 / theme=system / font=13</div><div class="task__meta"><code>08 §5</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p3-secret" checked><div class="task__main"><div class="task__label">秘密脱敏：Debug / 错误 / 支持包输出不含 api_key/authorization/cookie/token</div><div class="task__meta"><code>14 V-CFG-02</code></div></div></div>
+        </div>
+        <div class="group" data-group="impl-p3">
+          <h3>3.2 hermes-store：JSONL 会话存储 <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：hermes-core Session 模型</div>
+          <div class="task"><input type="checkbox" data-id="impl-p3-crud" checked><div class="task__main"><div class="task__label"><code>SessionStore</code>：create / append / load / list（按 created_at 倒序）</div><div class="task__meta"><code>02 §3</code>、<code>12 §5.1</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p3-recover" checked><div class="task__main"><div class="task__label"><code>recover()</code>：检测末尾换行，截断不完整行后重写并重载</div><div class="task__meta"><code>02 §4</code>、<code>14 V-STORE-01</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p3-archive" checked><div class="task__main"><div class="task__label"><code>archive()</code>：gzip 压缩为 <code>.jsonl.gz</code> 后删除原文件</div><div class="task__meta"><code>02 §5</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p3-atomic" checked><div class="task__main"><div class="task__label">原子写入：写临时文件 + rename，中断后旧/新文件二选一完整可读</div><div class="task__meta"><code>14 V-STORE-02</code></div></div></div>
+        </div>
+        <div class="group" data-group="impl-p3">
+          <h3>3.3 hermes-compaction <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：hermes-core（trait）；LlmSummaryCompaction 依赖 Provider（P1）</div>
+          <div class="task"><input type="checkbox" data-id="impl-p3-cmp-trait" checked><div class="task__main"><div class="task__label"><code>CompactionStrategy</code> trait：should_compact / compact / name</div><div class="task__meta"><code>06 §2</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p3-sliding" checked><div class="task__main"><div class="task__label"><code>SlidingWindowCompaction</code>：保留前 N + 后 N，中间插占位符；80% 阈值触发</div><div class="task__meta"><code>06 §3.1</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p3-llmsummary" checked><div class="task__main"><div class="task__label"><code>LlmSummaryCompaction</code>：前半段调 Provider 生成摘要，保留后半段</div><div class="task__meta"><code>06 §3.2</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p3-smart" checked><div class="task__main"><div class="task__label"><code>SmartCompaction</code>：保留首条/最近N条/所有工具结果，压缩闲聊</div><div class="task__meta"><code>06 §3.3</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p3-manager" checked><div class="task__main"><div class="task__label"><code>CompactionManager</code>：auto_compact（按策略顺序）/ compact_with（指定策略名）</div><div class="task__meta"><code>06 §4 §5</code></div></div></div>
+        </div>
+        <div class="gate"><h4>P3 阶段门</h4><p>配置优先级固定且测试；敏感值不打印；压缩前后关键信息可追溯。</p></div>
+      </div>
+    </details>
+
+    <!-- P4 -->
+    <details class="phase" data-phase="P4">
+      <summary><span class="chev">▶</span><h2><span class="tag tag--p">P4</span> IPC 与 Tauri 外壳（仅需要者）</h2><span class="count" data-count></span></summary>
+      <div class="phase__body">
+        <p class="note"><b>串行前置</b>：P0–P3。<b>可并行</b>：IPC 与 Tauri 双线。<b>来源</b>：09-ipc、10-tauri、12 §6 §9。IPC 用于桌面主进程与 Worker 通信；服务端产品可用 HTTP/WS（非公共层）。Tauri 命令注册需 <code>tauri</code> 运行时，属产品层。</p>
+        <div class="group" data-group="impl-p4">
+          <h3>4.1 hermes-ipc <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：hermes-core</div>
+          <div class="task"><input type="checkbox" data-id="impl-p4-protocol" checked><div class="task__main"><div class="task__label">JSON-RPC 2.0 协议 + 帧格式（4B big-endian 长度头 + JSON payload）</div><div class="task__meta"><code>09 §2 §3</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p4-server" checked><div class="task__main"><div class="task__label"><code>IpcServer</code>：Unix Socket（权限 0o600）/ Windows Named Pipe；register + serve + handle_connection</div><div class="task__meta"><code>09 §4 §6</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p4-client" checked><div class="task__main"><div class="task__label"><code>IpcClient</code>：connect + call + 接收循环（oneshot 分发），超时映射 IpcTimeout</div><div class="task__meta"><code>09 §5</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p4-handshake" checked><div class="task__main"><div class="task__label">版本握手：method/params 带版本，不兼容返回明确错误</div><div class="task__meta"><code>14 §4 兼容性表</code></div></div></div>
+        </div>
+        <div class="group" data-group="impl-p4">
+          <h3>4.2 hermes-tauri 运行时无关核心（命令注册属产品层，不在本清单） <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：hermes-core + hermes-config</div>
+          <div class="task"><input type="checkbox" data-id="impl-p4-state" checked><div class="task__main"><div class="task__label"><code>AppState</code>：init 组装 config/session_store/tool_host/event_sender（broadcast 256）</div><div class="task__meta"><code>10 §3</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p4-events" checked><div class="task__main"><div class="task__label"><code>AppEvent</code> 推送：TextDelta / ToolUse / ToolResult / MessageComplete / Error / SessionChanged / ConfigUpdated</div><div class="task__meta"><code>10 §5</code></div></div></div>
+        </div>
+        <div class="gate"><h4>P4 阶段门</h4><p>请求/事件可往返；版本不兼容被拒绝；窗口重启后状态可恢复。</p></div>
+      </div>
+    </details>
+
+    <!-- P5 -->
+    <details class="phase" data-phase="P5">
+      <summary><span class="chev">▶</span><h2><span class="tag tag--p">P5</span> Workspace 集成与版本治理</h2><span class="count" data-count></span></summary>
+      <div class="phase__body">
+        <p class="note"><b>串行前置</b>：P0–P4。<b>来源</b>：11-crate-mapping、13-submodule。</p>
+        <div class="group" data-group="impl-p5">
+          <h3>5.1 Workspace 接入 <span class="count"></span></h3>
+          <div class="task"><input type="checkbox" data-id="impl-p5-workspace" checked><div class="task__main"><div class="task__label">在产品仓库根 <code>Cargo.toml</code> 以相对路径登记公共 crate 成员</div><div class="task__meta"><code>11 §workspace</code>、<code>13 §4</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p5-alias" checked><div class="task__main"><div class="task__label">通过 <code>[workspace.dependencies]</code> 别名引用；业务 crate 用 <code>{ workspace = true }</code></div><div class="task__meta"><code>13 §4</code>；公共 crate 不得反向依赖任何产品私有 crate</div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p5-submodule" checked><div class="task__main"><div class="task__label">Git submodule 固定审查过的 tag/commit；升级需显式 diff 审查 + 提交 gitlink</div><div class="task__meta"><code>13 §3</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p5-lock" checked><div class="task__main"><div class="task__label">两端各维护 <code>contract-lock.json</code>（publicContract 版本 + commit + 验证命令）</div><div class="task__meta"><code>13 §6</code></div></div></div>
+        </div>
+        <div class="group" data-group="impl-p5">
+          <h3>5.2 版本与兼容性政策 <span class="count"></span></h3>
+          <div class="task"><input type="checkbox" data-id="impl-p5-semver" checked><div class="task__main"><div class="task__label">遵循 Semver：措辞/示例变更=patch；新增可选字段/方法/事件=minor；删除/改名/改默认权限/改事件顺序=major</div><div class="task__meta"><code>13 §6 版本表</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p5-migration" checked><div class="task__main"><div class="task__label">破坏性变更附迁移页与版本号；安全漏洞立即 patch/major 并说明截止时间</div><div class="task__meta"><code>13 §6</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p5-schemaversion" checked><div class="task__main"><div class="task__label">JSONL/配置/IPC/ToolSpec 均带 schemaVersion + 显式默认 + 升级路径</div><div class="task__meta"><code>14 §4 兼容性表</code></div></div></div>
+        </div>
+      </div>
+    </details>
+
+    <!-- ===================== 可验证步骤 ===================== -->
+    <h2 style="font-size:1.5rem;border-bottom:1px solid var(--line);padding-bottom:.3em;margin-top:1.6em;">二、可验证步骤（测试齐全）</h2>
+    <p class="note" style="color:var(--muted)">分层质量门：<b>静态 → DTO 契约 → 集成契约 → 双消费者黑盒 → 故障演练</b>。所有测试向量须做成无网络、可重复的 fixture（<code>14 §3</code>）。</p>
+
+    <details class="phase" open data-phase="TEST-static">
+      <summary><span class="chev">▶</span><h2>静态质量门 <span class="count" data-count></span></h2></summary>
+      <div class="phase__body">
+        <div class="group" data-group="test-static">
+          <h3>格式与静态检查 <span class="count"></span></h3>
+          <div class="task"><input type="checkbox" data-id="test-static-fmt" checked><div class="task__main"><div class="task__label"><code>cargo fmt --all -- --check</code> 通过</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-static-clippy" checked><div class="task__main"><div class="task__label"><code>cargo clippy --all-targets -- -D warnings</code> 通过</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-static-unsafe" checked><div class="task__main"><div class="task__label">无 <code>unsafe</code> 绕过（公共 crate 审查）</div><div class="task__meta"><code>14 §2 静态层</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-static-doc" checked><div class="task__main"><div class="task__label">公开类型/trait 有文档注释；<code>cargo doc</code> 无警告</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-static-errorclass" checked><div class="task__main"><div class="task__label">错误可分类（每条 Error 变体可被识别为可恢复/不可恢复）</div></div></div>
+        </div>
+      </div>
+    </details>
+
+    <details class="phase" data-phase="TEST-dto">
+      <summary><span class="chev">▶</span><h2>DTO 序列化契约 <span class="count" data-count></span></h2></summary>
+      <div class="phase__body">
+        <div class="group" data-group="test-dto">
+          <h3>消息与 Provider <span class="count"></span></h3>
+          <div class="task"><input type="checkbox" data-id="test-v-msg-01" checked><div class="task__main"><div class="task__label"><span class="vec">V-MSG-01</span> User(Text) → Assistant(Text) 序列化→反序列化，内容与 role 不变</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-v-msg-02" checked><div class="task__main"><div class="task__label"><span class="vec">V-MSG-02</span> Assistant(ToolUse id=A) 后必须紧接 User(ToolResult id=A)</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-v-msg-03" checked><div class="task__main"><div class="task__label"><span class="vec">V-MSG-03</span> 取消发生在 ToolUse 后/ToolResult 前时，补写 is_error=true 的 cancelled 结果</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-v-prov-01" checked><div class="task__main"><div class="task__label"><span class="vec">V-PROV-01</span> stream 依次产生 TextDelta、ToolUse、Usage、Done；不依赖网络分块边界</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-v-prov-02" checked><div class="task__main"><div class="task__label"><span class="vec">V-PROV-02</span> 不可恢复错误时流终结，错误带可展示分类，不泄露 API key</div></div></div>
+        </div>
+        <div class="group" data-group="test-dto">
+          <h3>ToolHost 与 MCP <span class="count"></span></h3>
+          <div class="task"><input type="checkbox" data-id="test-v-tool-01" checked><div class="task__main"><div class="task__label"><span class="vec">V-TOOL-01</span> 未知工具默认拒绝或要求确认，绝不直接执行</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-v-tool-02" checked><div class="task__main"><div class="task__label"><span class="vec">V-TOOL-02</span> 同名内置工具与 MCP 工具不碰撞；MCP 使用 <code>server__tool</code> 命名</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-v-tool-03" checked><div class="task__main"><div class="task__label"><span class="vec">V-TOOL-03</span> stdio 子进程退出后，下次调用返回可诊断错误，不损坏会话 writer</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-v-tool-04" checked><div class="task__main"><div class="task__label"><span class="vec">V-TOOL-04</span> Streamable HTTP 超时/非2xx/非法 JSON 映射为稳定错误类别</div></div></div>
+        </div>
+        <div class="group" data-group="test-dto">
+          <h3>会话 / 配置 / 压缩 <span class="count"></span></h3>
+          <div class="task"><input type="checkbox" data-id="test-v-store-01" checked><div class="task__main"><div class="task__label"><span class="vec">V-STORE-01</span> JSONL 最后一行只写一半时，恢复保留完整历史并报告截断</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-v-store-02" checked><div class="task__main"><div class="task__label"><span class="vec">V-STORE-02</span> 原子写入中断后，旧/新文件二者之一完整可读，无混合内容</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-v-cfg-01" checked><div class="task__main"><div class="task__label"><span class="vec">V-CFG-01</span> 默认值 &lt; 配置文件 &lt; 环境变量 &lt; 显式参数 优先级固定且有测试</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-v-cfg-02" checked><div class="task__main"><div class="task__label"><span class="vec">V-CFG-02</span> 调试输出/错误/支持包不含 api_key、authorization、cookie、token</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-v-comp-01" checked><div class="task__main"><div class="task__label"><span class="vec">V-COMP-01</span> 压缩前后最近 user 目标、未完成工具结果、持久事实均可追溯</div></div></div>
+        </div>
+        <div class="group" data-group="test-dto">
+          <h3>兼容性与迁移 <span class="count"></span></h3>
+          <div class="task"><input type="checkbox" data-id="test-mig-unknown" checked><div class="task__main"><div class="task__label">未知字段策略：旧实现读取含未知字段的未来 fixture 不崩溃（保留或警告）</div><div class="task__meta"><code>14 §4</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-mig-three" checked><div class="task__main"><div class="task__label">迁移 fixture 至少三份：最早支持版本 / 上一版本 / 含未知字段的未来版本</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-mig-toolspec" checked><div class="task__main"><div class="task__label">ToolSpec 新字段不改变旧确认策略；旧 consumer 不执行未知动作</div></div></div>
+        </div>
+      </div>
+    </details>
+
+    <details class="phase" data-phase="TEST-integ">
+      <summary><span class="chev">▶</span><h2>集成契约（mock + fixture，临时目录可重复跑） <span class="count" data-count></span></h2></summary>
+      <div class="phase__body">
+        <div class="group" data-group="test-integ">
+          <h3>单元 / 集成测试 <span class="count"></span></h3>
+          <div class="task"><input type="checkbox" data-id="test-integ-mockprov" checked><div class="task__main"><div class="task__label">MockProvider 录制/回放 stream 事件，验证完整 Agent 循环（无网络）</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-integ-mcpstdio" checked><div class="task__main"><div class="task__label">stdio MCP fixture：连接→list→call→断开→可诊断错误</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-integ-mcphttp" checked><div class="task__main"><div class="task__label">HTTP MCP fixture：超时/非2xx/非法 JSON 三类错误映射</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-integ-store-tmp" checked><div class="task__main"><div class="task__label">SessionStore 在 tempdir 中跑 create/append/load/recover/archive 全流程</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-integ-cancel" checked><div class="task__main"><div class="task__label">取消配对：ToolUse 后取消 → 补写 ToolResult(is_error) → 可再次请求 Provider</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-integ-compaction" checked><div class="task__main"><div class="task__label">CompactionManager auto_compact 触发 + 输入范围/摘要来源可审计</div><div class="task__meta"><code>14 §5</code>；compaction 不得成为不可审计黑箱</div></div></div>
+          <div class="task"><input type="checkbox" data-id="test-integ-ipc" checked><div class="task__main"><div class="task__label">IPC 请求→响应→事件往返；版本不兼容握手拒绝</div></div></div>
+        </div>
+      </div>
+    </details>
+
+    <details class="phase" data-phase="TEST-dual">
+      <summary><span class="chev">▶</span><h2>下游消费者验证（非 agent-core 范围）</h2></summary>
+      <div class="phase__body">
+        <p class="note"><b>范围边界</b>：agent-core 是公共层，只交付合同与公共侧测试。下列“两个下游消费者对同一向量给出一致结果”的验证属产品仓库职责，不在本 crate 勾选范围内（<code>13 §7</code>）。agent-core 侧需保证的是：合同稳定、可被任意消费者独立实现并通过。</p>
+        <div class="gate"><h4>agent-core 侧义务</h4><p>① 公开 trait / DTO 稳定且有版本策略；② 提供无网络、可重复的公共测试向量（V-*）；③ 不向公共 crate 反向渗入任何产品私有类型；④ 破坏性变更附迁移说明。消费者侧的契约测试由各产品仓库维护。</p></div>
+      </div>
+    </details>
+
+    <!-- ===================== 验收标准 ===================== -->
+    <h2 style="font-size:1.5rem;border-bottom:1px solid var(--line);padding-bottom:.3em;margin-top:1.6em;">三、验收标准及验收步骤</h2>
+
+    <details class="phase" open data-phase="ACCEPT-gates">
+      <summary><span class="chev">▶</span><h2>阶段验收门 <span class="count" data-count></span></h2></summary>
+      <div class="phase__body">
+        <p class="note">每个 P 阶段须先由两个消费者各写一组契约测试通过后，才允许下一阶段开始（<code>13 §5</code>）。</p>
+        <div class="gate"><h4>P0 验收</h4><p><b>标准</b>：serde 往返通过；未知字段策略有测试；崩溃后 JSONL 可读取。</p><p><b>步骤</b>：①运行 DTO 往返测试 ②投递含未知字段的 fixture ③构造半行 JSONL 跑 recover。</p></div>
+        <div class="gate"><h4>P1 验收</h4><p><b>标准</b>：流式文本/工具调用/取消/usage 事件可录制。</p><p><b>步骤</b>：①MockProvider 回放完整 stream ②触发不可恢复错误验证不泄露 key ③取消后验证配对结果。</p></div>
+        <div class="gate"><h4>P2 验收</h4><p><b>标准</b>：工具命名不碰撞；失败默认拒绝/确认；MCP stdio/HTTP 断开可恢复。</p><p><b>步骤</b>：①同名内置+MCP 工具并存 ②调用未知工具 ③杀掉 stdio 子进程后调用 ④HTTP 超时/非2xx。</p></div>
+        <div class="gate"><h4>P3 验收</h4><p><b>标准</b>：配置优先级固定；敏感值不打印；长对话摘要不丢关联。</p><b>步骤</b>：①四级优先级覆盖测试 ②Debug 输出扫描敏感词 ③压缩后验证 user 目标/工具结果/事实保留。</p></div>
+        <div class="gate"><h4>P4 验收</h4><p><b>标准</b>：请求/事件可往返；版本不兼容被拒绝；窗口重启状态可恢复。</p><p><b>步骤</b>：①IPC 请求-响应-事件端到端 ②握手版本不匹配 ③杀进程后重启恢复会话。</p></div>
+        <div class="group" data-group="accept-gates">
+          <h3>阶段门勾选汇总 <span class="count"></span></h3>
+          <div class="task"><input type="checkbox" data-id="accept-gate-p0" checked><div class="task__main"><div class="task__label">P0 阶段门全绿</div></div></div>
+          <div class="task"><input type="checkbox" data-id="accept-gate-p1" checked><div class="task__main"><div class="task__label">P1 阶段门全绿</div></div></div>
+          <div class="task"><input type="checkbox" data-id="accept-gate-p2" checked><div class="task__main"><div class="task__label">P2 阶段门全绿</div></div></div>
+          <div class="task"><input type="checkbox" data-id="accept-gate-p3" checked><div class="task__main"><div class="task__label">P3 阶段门全绿</div></div></div>
+          <div class="task"><input type="checkbox" data-id="accept-gate-p4" checked><div class="task__main"><div class="task__label">P4 阶段门全绿</div></div></div>
+        </div>
+      </div>
+    </details>
+
+    <details class="phase" data-phase="ACCEPT-drill">
+      <summary><span class="chev">▶</span><h2>故障演练（发布前硬门） <span class="count" data-count></span></h2></summary>
+      <div class="phase__body">
+        <div class="group" data-group="accept-drill">
+          <h3>四类故障演练 <span class="count"></span></h3>
+          <div class="task"><input type="checkbox" data-id="accept-drill-cancel" checked><div class="task__main"><div class="task__label">取消配对演练：ToolUse 后取消，验证补写 ToolResult(is_error) 且会话不损坏</div></div></div>
+          <div class="task"><input type="checkbox" data-id="accept-drill-restart" checked><div class="task__main"><div class="task__label">进程重启演练：杀进程后 JSONL 可恢复，状态可投影</div></div></div>
+          <div class="task"><input type="checkbox" data-id="accept-drill-disconnect" checked><div class="task__main"><div class="task__label">连接断开演练：MCP stdio/HTTP 断开后可诊断 + 自动重连</div></div></div>
+          <div class="task"><input type="checkbox" data-id="accept-drill-badconfig" checked><div class="task__main"><div class="task__label">坏配置演练：缺字段/空 api_key/不可写目录 → 安全默认 + 明确错误</div></div></div>
+          <div class="task"><input type="checkbox" data-id="accept-drill-secret" checked><div class="task__main"><div class="task__label">秘密泄漏演练：诊断包/日志/错误输出扫描，确认无敏感值</div></div></div>
+        </div>
+        <div class="group" data-group="accept-drill">
+          <h3>性能与资源预算 <span class="count"></span></h3>
+          <div class="task"><input type="checkbox" data-id="accept-perf-stream" checked><div class="task__main"><div class="task__label">流式事件不全量复制历史；会话追加为线性写入</div><div class="task__meta"><code>14 §5</code></div></div></div>
+          <div class="task"><input type="checkbox" data-id="accept-perf-jsonl" checked><div class="task__main"><div class="task__label">JSONL 恢复支持流式读取，坏尾行不使整文件失效</div></div></div>
+          <div class="task"><input type="checkbox" data-id="accept-perf-mcp" checked><div class="task__main"><div class="task__label">MCP 连接/重连/超时有可配置上限</div></div></div>
+          <div class="task"><input type="checkbox" data-id="accept-perf-audit" checked><div class="task__main"><div class="task__label">compaction 记录输入范围与摘要来源，可审计</div></div></div>
+          <div class="task"><input type="checkbox" data-id="accept-perf-limits" checked><div class="task__main"><div class="task__label">所有 token/字节/深度限制在 DTO 中可观察、在错误中可解释</div></div></div>
+        </div>
+      </div>
+    </details>
+
+    <details class="phase" data-phase="ACCEPT-release">
+      <summary><span class="chev">▶</span><h2>发布前签核清单 <span class="count" data-count></span></h2></summary>
+      <div class="phase__body">
+        <p class="note">源自 <code>14 §6</code>。agent-core 作为公共层只对「公共合同本身」签核；产品可用性/安全/发布由各产品仓库各自质量门负责。</p>
+        <div class="group" data-group="accept-release">
+          <h3>agent-core 侧签核（公共合同本身） <span class="count"></span></h3>
+          <div class="task"><input type="checkbox" data-id="accept-rel-vec" checked><div class="task__main"><div class="task__label">最小测试向量在无网络环境下通过</div></div></div>
+          <div class="task"><input type="checkbox" data-id="accept-rel-migration" checked><div class="task__main"><div class="task__label">API、配置、JSONL 和 IPC 的破坏性变更均带迁移页与版本号</div></div></div>
+          <div class="task"><input type="checkbox" data-id="accept-rel-noleak" checked><div class="task__main"><div class="task__label">公共 crate 不含任何产品私有类型（依赖审计：公共 crate 不依赖产品私有 crate，无产品专属 DTO 变体）</div></div></div>
+        </div>
+        <div class="gate"><h4>下游产品侧签核（非 agent-core 范围，由各产品仓库维护）</h4><p>① 各产品固定同一 agent-core tag/commit；② 至少一个真实 Provider + mock 通过流式契约；③ 至少一个 stdio + 一个 HTTP MCP fixture 通过断开/超时；④ 会话截断/配置坏值/取消配对/未知工具四类故障演练有记录；⑤ 两产品可在不读取对方源码条件下凭本文档创建一致接口。这些项不在本 crate 勾选范围内。</p></div>
+      </div>
+    </details>
+
+    <div class="footer">
+      本清单依据 agent-core 文档站 00–15 篇生成 · 勾选状态保存于浏览器 localStorage · <a href="index.html">返回文档总览</a>
+    </div>
+  </main>
+
+  <script>
+    (function () {
+      var STORAGE_KEY = 'agent-core-checklist-v1';
+      var boxes = Array.prototype.slice.call(document.querySelectorAll('input[type="checkbox"][data-id]'));
+      var allBoxes = boxes;
+
+      // load：localStorage 覆盖 HTML 默认（已实现项在 HTML 中标记 checked）
+      try {
+        var saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+        boxes.forEach(function (b) {
+          if (saved[b.dataset.id] !== undefined) b.checked = saved[b.dataset.id];
+        });
+      } catch (e) {}
+
+      function save() {
+        var data = {};
+        boxes.forEach(function (b) { data[b.dataset.id] = b.checked; });
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      }
+
+      function refresh() {
+        // task done style
+        boxes.forEach(function (b) {
+          var task = b.closest('.task');
+          if (task) task.classList.toggle('done', b.checked);
+        });
+        // group counts
+        document.querySelectorAll('.group[data-group]').forEach(function (g) {
+          var gs = g.querySelectorAll('input[type="checkbox"][data-id]');
+          var done = g.querySelectorAll('input[type="checkbox"][data-id]:checked');
+          var c = g.querySelector('.count');
+          if (c) c.textContent = done.length + '/' + gs.length;
+        });
+        // phase counts
+        document.querySelectorAll('.phase').forEach(function (p) {
+          var ps = p.querySelectorAll('input[type="checkbox"][data-id]');
+          var done = p.querySelectorAll('input[type="checkbox"][data-id]:checked');
+          var c = p.querySelector('[data-count]');
+          if (c) c.textContent = ps.length ? (done.length + '/' + ps.length) : '';
+        });
+        // global
+        var total = allBoxes.length;
+        var done = allBoxes.filter(function (b) { return b.checked; }).length;
+        var pct = total ? Math.round(done / total * 100) : 0;
+        document.getElementById('globalFill').style.width = pct + '%';
+        document.getElementById('globalStats').innerHTML =
+          '<span>总进度：<b>' + done + '/' + total + '</b>（' + pct + '%）</span>' +
+          '<span>实施步骤：<b>' + countByPrefix('impl-') + '</b></span>' +
+          '<span>测试验证：<b>' + countByPrefix('test-') + '</b></span>' +
+          '<span>验收签核：<b>' + countByPrefix('accept-') + '</b></span>';
+      }
+      function countByPrefix(prefix) {
+        var sub = allBoxes.filter(function (b) { return b.dataset.id.indexOf(prefix) === 0; });
+        var d = sub.filter(function (b) { return b.checked; }).length;
+        return d + '/' + sub.length;
+      }
+
+      boxes.forEach(function (b) { b.addEventListener('change', function () { save(); refresh(); }); });
+
+      // toolbar
+      document.querySelector('.toolbar').addEventListener('click', function (e) {
+        var act = e.target.dataset.act;
+        if (act === 'expand') document.querySelectorAll('.phase').forEach(function (p) { p.open = true; });
+        if (act === 'collapse') document.querySelectorAll('.phase').forEach(function (p) { p.open = false; });
+        if (act === 'reset') {
+          if (confirm('确定清空所有勾选？此操作不可撤销。')) {
+            boxes.forEach(function (b) { b.checked = false; }); save(); refresh();
+          }
+        }
+        if (act === 'print') window.print();
+      });
+
+      refresh();
+    })();
+  </script>
+</body>
+</html>

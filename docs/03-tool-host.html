@@ -34,8 +34,7 @@ pub struct ToolSpec {
 pub enum ToolSource {
     Builtin,           // 内置工具
     MCP { server: String },  // MCP 工具
-    Gateway,           // Charter Tool Gateway 代理
-    Custom { id: String },   // 自定义工具
+    Custom { id: String },   // 产品层自定义工具（如网关代理等）
 }
 
 #[async_trait]
@@ -141,8 +140,9 @@ impl ToolHost for McpToolHost {
         server.call_tool(tool_name, args).await
     }
 }</code></pre></div>
-<h2 id="5-charter-tool-gateway-桥接">5. Charter Tool Gateway 桥接</h2>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// R-Code（Charter）特有层：将 ToolHost 桥接到 Tool Gateway
+<h2 id="5-产品层-toolhost-桥接示例不在公共-crate">5. 产品层 ToolHost 桥接（示例，不在公共 crate）</h2>
+<p><strong>本节为产品层实现示例，不属于 agent-core 公共层</strong>。产品（如桌面 IDE）可将 ToolHost 桥接到其专有网关；公共层只提供 <code>ToolHost</code> trait 与 <code>ToolSource::Custom</code> 钩子，不定义产品专属网关类型。</p>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// 产品层示例：将 ToolHost 桥接到产品专有网关
 
 pub struct GatewayToolHost {
     gateway: Arc&lt;ToolGateway&gt;,
@@ -164,7 +164,7 @@ impl ToolHost for GatewayToolHost {
             name: t.name,
             description: t.description,
             input_schema: t.input_schema,
-            source: ToolSource::Gateway,
+            source: ToolSource::Custom { id: "gateway".into() },
             requires_confirmation: t.risk_level &gt;= RiskLevel::R2,
         }).collect())
     }
