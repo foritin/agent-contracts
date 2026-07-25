@@ -46,194 +46,293 @@
 <h2 id="4-服务端实现">4. 服务端实现</h2>
 <div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-ipc/src/server.rs
 
-pub struct IpcServer {
-    listener: UnixListener,
-    handlers: HashMap&lt;String, Box&lt;dyn IpcHandler&gt;&gt;,
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
+
+// 平台特定的 listener
+#[cfg(unix)]
+type PlatformListener = tokio::net::UnixListener;
+
+#[cfg(windows)]
+struct WindowsPipeListener {
+    pipe_name: String,
 }
 
-#[async_trait]
-trait IpcHandler: Send + Sync {
+/// 请求处理器 trait（跨平台）。
+#[async_trait::async_trait]
+pub trait IpcHandler: Send + Sync {
     async fn handle(&amp;self, params: Value) -&gt; Result&lt;Value&gt;;
 }
 
+/// IPC 服务端（跨平台）。
+pub struct IpcServer {
+    #[cfg(unix)]
+    listener: PlatformListener,
+    #[cfg(windows)]
+    listener: WindowsPipeListener,
+    handlers: HashMap&lt;String, Arc&lt;dyn IpcHandler&gt;&gt;,
+    socket_path: PathBuf,
+}
+
 impl IpcServer {
-    pub fn new(socket_path: PathBuf) -&gt; Result&lt;Self&gt; {
-        // 清理旧 socket
-        if socket_path.exists() {
-            std::fs::remove_file(&amp;socket_path)?;
-        }
-        
-        let listener = UnixListener::bind(&amp;socket_path)?;
-        
-        // 设置权限（仅 owner）
+    /// 绑定 IPC 端点。
+    /// - Unix: 绑定 Unix Socket，清理旧文件，设置 0o600 权限。
+    /// - Windows: 记录 Named Pipe 名称（实例在 serve() 中按需创建）。
+    pub fn bind(socket_path: PathBuf) -&gt; Result&lt;Self&gt; {
         #[cfg(unix)]
         {
+            // 清理旧 socket
+            if socket_path.exists() {
+                std::fs::remove_file(&amp;socket_path)?;
+            }
+            let listener = tokio::net::UnixListener::bind(&amp;socket_path)?;
+
+            // 设置权限（仅 owner）
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&amp;socket_path, Permissions::from_mode(0o600))?;
+            std::fs::set_permissions(
+                &amp;socket_path,
+                std::fs::Permissions::from_mode(0o600),
+            )?;
+
+            Ok(Self { listener, handlers: HashMap::new(), socket_path })
         }
-        
-        Ok(Self {
-            listener,
-            handlers: HashMap::new(),
-        })
+
+        #[cfg(windows)]
+        {
+            // 路径转换: /tmp/r-code.sock -&gt; \\.\pipe\r-code-r-code.sock
+            let pipe_name = format!(
+                r&quot;\\.\pipe\r-code-{}&quot;,
+                socket_path.file_name().and_then(|n| n.to_str()).unwrap_or(&quot;default&quot;)
+            );
+            Ok(Self {
+                listener: WindowsPipeListener { pipe_name },
+                handlers: HashMap::new(),
+                socket_path,
+            })
+        }
     }
-    
-    pub fn register(&amp;mut self, method: &amp;str, handler: Box&lt;dyn IpcHandler&gt;) {
+
+    pub fn register(&amp;mut self, method: &amp;str, handler: Arc&lt;dyn IpcHandler&gt;) {
         self.handlers.insert(method.to_string(), handler);
     }
-    
-    pub async fn serve(&amp;self) -&gt; Result&lt;()&gt; {
-        loop {
-            let (mut stream, _addr) = self.listener.accept().await?;
-            
-            let handlers = self.handlers.clone();
-            tokio::spawn(async move {
-                if let Err(e) = Self::handle_connection(stream, handlers).await {
-                    tracing::error!(&quot;IPC connection error: {}&quot;, e);
-                }
-            });
+
+    pub async fn serve(self) -&gt; Result&lt;()&gt; {
+        #[cfg(unix)]
+        {
+            loop {
+                let (stream, _addr) = self.listener.accept().await?;
+                let handlers = self.handlers.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = Self::handle_connection(stream, handlers).await {
+                        tracing::error!(&quot;IPC connection error: {e}&quot;);
+                    }
+                });
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            use tokio::net::windows::named_pipe::ServerOptions;
+            let pipe_name = self.listener.pipe_name.clone();
+            loop {
+                // 每个连接创建独立的 pipe 实例
+                let server = ServerOptions::new()
+                    .first_pipe_instance(false)
+                    .create(&amp;pipe_name)?;
+                server.connect().await?;
+
+                let handlers = self.handlers.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = Self::handle_connection(server, handlers).await {
+                        tracing::error!(&quot;IPC connection error: {e}&quot;);
+                    }
+                });
+            }
         }
     }
-    
-    async fn handle_connection(
-        mut stream: UnixStream,
-        handlers: HashMap&lt;String, Box&lt;dyn IpcHandler&gt;&gt;,
-    ) -&gt; Result&lt;()&gt; {
+
+    /// 处理单个客户端连接（泛型，跨平台复用）。
+    async fn handle_connection&lt;S&gt;(
+        mut stream: S,
+        handlers: HashMap&lt;String, Arc&lt;dyn IpcHandler&gt;&gt;,
+    ) -&gt; Result&lt;()&gt;
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
         loop {
-            // 读取帧头
-            let mut len_buf = [0u8; 4];
-            stream.read_exact(&amp;mut len_buf).await?;
-            let len = u32::from_be_bytes(len_buf) as usize;
-            
-            // 读取 payload
-            let mut buf = vec![0u8; len];
-            stream.read_exact(&amp;mut buf).await?;
-            
-            let request: JsonRpcRequest = serde_json::from_slice(&amp;buf)?;
-            
-            // 处理
+            let request: JsonRpcRequest = read_message(&amp;mut stream).await?;
             let response = match handlers.get(&amp;request.method) {
-                Some(handler) =&gt; {
-                    match handler.handle(request.params.unwrap_or(Value::Null)).await {
-                        Ok(result) =&gt; JsonRpcResponse {
-                            jsonrpc: &quot;2.0&quot;.into(),
-                            id: request.id,
-                            result: Some(result),
-                            error: None,
-                        },
-                        Err(e) =&gt; JsonRpcResponse {
-                            jsonrpc: &quot;2.0&quot;.into(),
-                            id: request.id,
-                            result: None,
-                            error: Some(JsonRpcError {
-                                code: -32603,
-                                message: e.to_string(),
-                            }),
-                        },
-                    }
-                }
-                None =&gt; JsonRpcResponse {
-                    jsonrpc: &quot;2.0&quot;.into(),
-                    id: request.id,
-                    result: None,
-                    error: Some(JsonRpcError {
-                        code: -32601,
-                        message: format!(&quot;method not found: {}&quot;, request.method),
-                    }),
+                Some(h) =&gt; match h.handle(request.params.unwrap_or(Value::Null)).await {
+                    Ok(result) =&gt; JsonRpcResponse::success(
+                        request.id.unwrap_or_default(),
+                        result,
+                    ),
+                    Err(e) =&gt; JsonRpcResponse::error(
+                        request.id,
+                        JsonRpcError::INTERNAL_ERROR,
+                        e.to_string(),
+                    ),
                 },
+                None =&gt; JsonRpcResponse::error(
+                    request.id,
+                    JsonRpcError::METHOD_NOT_FOUND,
+                    format!(&quot;method not found: {}&quot;, request.method),
+                ),
             };
-            
-            // 发送响应
-            let response_json = serde_json::to_vec(&amp;response)?;
-            let response_len = response_json.len() as u32;
-            stream.write_all(&amp;response_len.to_be_bytes()).await?;
-            stream.write_all(&amp;response_json).await?;
+            if request.id.is_some() {
+                write_message(&amp;mut stream, &amp;response).await?;
+                stream.flush().await;
+            }
         }
     }
 }</code></pre></div>
 <h2 id="5-客户端实现">5. 客户端实现</h2>
 <div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-ipc/src/client.rs
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::{oneshot, Mutex};
+
+/// Named Pipe 名称前缀（Windows）。
+#[cfg(windows)]
+const PIPE_PREFIX: &amp;str = r&quot;\\.\pipe\r-code-&quot;;
+
+/// IPC 客户端（跨平台）。
+///
+/// 内部用 boxed trait object 持有 read/write 半边：
+/// - Unix: OwnedReadHalf / OwnedWriteHalf（UnixStream::into_split）
+/// - Windows: ReadHalf / WriteHalf（tokio::io::split）
 pub struct IpcClient {
-    stream: UnixStream,
+    write: Arc&lt;Mutex&lt;Box&lt;dyn AsyncWrite + Unpin + Send&gt;&gt;&gt;,
     pending: Arc&lt;Mutex&lt;HashMap&lt;String, oneshot::Sender&lt;JsonRpcResponse&gt;&gt;&gt;&gt;,
     next_id: Arc&lt;AtomicU64&gt;,
 }
 
 impl IpcClient {
-    pub async fn connect(socket_path: &amp;Path) -&gt; Result&lt;Self&gt; {
-        let stream = UnixStream::connect(socket_path).await?;
-        
-        let client = Self {
-            stream,
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            next_id: Arc::new(AtomicU64::new(1)),
-        };
-        
-        // 启动接收循环
-        client.start_recv_loop();
-        
-        Ok(client)
+    /// 连接到 IPC 服务端。
+    /// - Unix: UnixStream::connect + into_split
+    /// - Windows: ClientOptions::open + tokio::io::split
+    pub async fn connect(path: &amp;Path) -&gt; Result&lt;Self&gt; {
+        #[cfg(unix)]
+        {
+            let stream = tokio::net::UnixStream::connect(path).await?;
+            let (read, write) = stream.into_split();
+            Ok(Self::from_halves(Box::new(read), Box::new(write)))
+        }
+
+        #[cfg(windows)]
+        {
+            // 路径转换: /tmp/r-code.sock -&gt; \\.\pipe\r-code-r-code.sock
+            let pipe_name = if path.to_string_lossy().starts_with(PIPE_PREFIX) {
+                path.to_string_lossy().to_string()
+            } else {
+                format!(
+                    &quot;{}{}&quot;,
+                    PIPE_PREFIX,
+                    path.file_name().and_then(|n| n.to_str()).unwrap_or(&quot;default&quot;)
+                )
+            };
+            let stream = tokio::net::windows::named_pipe::ClientOptions::new()
+                .open(&amp;pipe_name)?;
+            let (read, write) = tokio::io::split(stream);
+            Ok(Self::from_halves(Box::new(read), Box::new(write)))
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = path;
+            Err(Error::Ipc(&quot;unsupported platform&quot;.into()))
+        }
     }
-    
+
+    /// 从已拆分的 read/write 半边构造客户端。
+    fn from_halves(
+        read: Box&lt;dyn AsyncRead + Unpin + Send&gt;,
+        write: Box&lt;dyn AsyncWrite + Unpin + Send&gt;,
+    ) -&gt; Self {
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending_clone = pending.clone();
+        tokio::spawn(async move {
+            Self::recv_loop(read, pending_clone).await;
+        });
+        Self {
+            write: Arc::new(Mutex::new(write)),
+            pending,
+            next_id: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
     pub async fn call(&amp;self, method: &amp;str, params: Value) -&gt; Result&lt;Value&gt; {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst).to_string();
         let (tx, rx) = oneshot::channel();
-        
         self.pending.lock().await.insert(id.clone(), tx);
-        
-        let request = JsonRpcRequest {
-            jsonrpc: &quot;2.0&quot;.into(),
-            id: Some(id),
-            method: method.to_string(),
-            params: Some(params),
-        };
-        
-        let json = serde_json::to_vec(&amp;request)?;
-        let len = json.len() as u32;
-        self.stream.write_all(&amp;len.to_be_bytes()).await?;
-        self.stream.write_all(&amp;json).await?;
-        
+
+        let request = JsonRpcRequest::new(method, id.clone(), Some(params));
+        {
+            let mut w = self.write.lock().await;
+            write_message(&amp;mut *w, &amp;request).await?;
+        }
+
         let response = rx.await.map_err(|_| Error::IpcTimeout)?;
-        
         match response.error {
-            Some(e) =&gt; Err(Error::Ipc(e.message)),
+            Some(e) =&gt; Err(Error::Ipc(format!(&quot;[{}] {}&quot;, e.code, e.message))),
             None =&gt; Ok(response.result.unwrap_or(Value::Null)),
         }
     }
-    
-    fn start_recv_loop(&amp;self) {
-        let pending = self.pending.clone();
-        let mut stream = self.stream.try_clone().unwrap();
-        
-        tokio::spawn(async move {
-            loop {
-                // 读取并分发响应
-            }
-        });
-    }
-}</code></pre></div>
-<h2 id="6-windows-named-pipe">6. Windows Named Pipe</h2>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">#[cfg(windows)]
-pub use windows::{IpcServerNamedPipe, IpcClientNamedPipe};
 
-#[cfg(windows)]
-mod windows {
-    use tokio::net::windows::named_pipe::{ServerOptions, ClientOptions};
-    
-    pub struct IpcServerNamedPipe {
-        pipe: tokio::net::windows::named_pipe::NamedPipeServer,
-    }
-    
-    impl IpcServerNamedPipe {
-        pub fn new(name: &amp;str) -&gt; Result&lt;Self&gt; {
-            let pipe = ServerOptions::new()
-                .first_pipe_instance(true)
-                .create(name)?;
-            Ok(Self { pipe })
+    async fn recv_loop(
+        mut read: Box&lt;dyn AsyncRead + Unpin + Send&gt;,
+        pending: Arc&lt;Mutex&lt;HashMap&lt;String, oneshot::Sender&lt;JsonRpcResponse&gt;&gt;&gt;&gt;,
+    ) {
+        loop {
+            match read_message::&lt;_, JsonRpcResponse&gt;(&amp;mut read).await {
+                Ok(resp) =&gt; {
+                    if let Some(id) = resp.id.clone() {
+                        if let Some(tx) = pending.lock().await.remove(&amp;id) {
+                            let _ = tx.send(resp);
+                        }
+                    }
+                }
+                Err(_) =&gt; break,
+            }
         }
     }
-}</code></pre></div></article><aside class="toc" aria-label="本页目录"></aside></main>
+}</code></pre></div>
+<h2 id="6-windows-named-pipe">6. Windows Named Pipe 适配</h2>
+<p>Windows 不支持 Unix Socket，改用 Named Pipe。由于 tokio 的 <code>NamedPipeServer</code> / <code>NamedPipeClient</code> 同样实现 <code>AsyncRead</code> + <code>AsyncWrite</code>，服务端 <code>handle_connection&lt;S&gt;</code> 与客户端的 boxed 半边无需任何平台分支即可复用，差异仅集中在端点绑定 / 连接处。</p>
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// 路径转换: /tmp/r-code.sock -&gt; \\.\pipe\r-code-r-code.sock
+//
+// 服务端 (bind): WindowsPipeListener { pipe_name } 仅记录名称，
+//   实际 pipe 实例在 serve() 中按 ServerOptions::new().create() 创建。
+// 客户端 (connect): ClientOptions::new().open(&amp;pipe_name) 直连。
+
+#[cfg(windows)]
+const PIPE_PREFIX: &amp;str = r&quot;\\.\pipe\r-code-&quot;;
+
+fn to_pipe_name(path: &amp;Path) -&gt; String {
+    let s = path.to_string_lossy();
+    if s.starts_with(PIPE_PREFIX) {
+        s.into_owned()
+    } else {
+        format!(
+            &quot;{}{}&quot;,
+            PIPE_PREFIX,
+            path.file_name().and_then(|n| n.to_str()).unwrap_or(&quot;default&quot;)
+        )
+    }
+}
+
+// 服务端：每个连接创建独立 pipe 实例
+//   let server = ServerOptions::new()
+//       .first_pipe_instance(false)
+//       .create(&amp;pipe_name)?;
+//   server.connect().await?;
+//
+// 客户端：直连后用 tokio::io::split 拆分读写半边
+//   let stream = ClientOptions::new().open(&amp;pipe_name)?;
+//   let (read, write) = tokio::io::split(stream);</code></pre></div></article><aside class="toc" aria-label="本页目录"></aside></main>
   <footer class="doc-footer">本页为可离线浏览的重构规范；代码示例是实现合同，不是已交付源码。</footer>
   <script src="assets/site.js"></script>
 </body>

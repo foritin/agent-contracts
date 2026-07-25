@@ -1,4 +1,4 @@
-//! IPC 客户端：连接 Unix Socket，发送请求并异步等待响应。
+//! IPC 客户端：Unix Socket（macOS）/ Named Pipe（Windows）。
 //!
 //! 参见 `09-ipc-transport.html §5`。
 
@@ -10,28 +10,78 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{oneshot, Mutex};
 
 /// 默认调用超时。
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// IPC 客户端。
+/// Named Pipe 名称前缀（Windows）。
+#[cfg(windows)]
+const PIPE_PREFIX: &str = r"\\.\pipe\r-code-";
+
+/// IPC 客户端（跨平台）。
+///
+/// 内部使用 boxed trait object 持有 read/write 半边，
+/// 在 Unix 上是 `OwnedReadHalf`/`OwnedWriteHalf`，
+/// 在 Windows 上是 `ReadHalf<NamedPipeClient>`/`WriteHalf<NamedPipeClient>`。
 pub struct IpcClient {
-    write: Arc<Mutex<OwnedWriteHalf>>,
+    write: Arc<Mutex<Box<dyn AsyncWrite + Unpin + Send>>>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<JsonRpcResponse>>>>,
     next_id: Arc<AtomicU64>,
 }
 
 impl IpcClient {
-    /// 连接到 Unix Socket。
+    /// 连接到 IPC 服务端。
+    ///
+    /// - Unix: 连接 Unix Socket 文件。
+    /// - Windows: 连接 Named Pipe（路径自动转换为 pipe 名称）。
     pub async fn connect(path: &Path) -> Result<Self> {
-        let stream = UnixStream::connect(path)
-            .await
-            .map_err(|e| Error::Ipc(format!("connect failed: {e}")))?;
-        let (read, write) = stream.into_split();
+        #[cfg(unix)]
+        {
+            let stream = tokio::net::UnixStream::connect(path)
+                .await
+                .map_err(|e| Error::Ipc(format!("connect failed: {e}")))?;
+            let (read, write) = stream.into_split();
 
+            Ok(Self::from_halves(Box::new(read), Box::new(write)))
+        }
+
+        #[cfg(windows)]
+        {
+            let pipe_name = if path.to_string_lossy().starts_with(PIPE_PREFIX) {
+                path.to_string_lossy().to_string()
+            } else {
+                format!(
+                    "{}{}",
+                    PIPE_PREFIX,
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("default")
+                )
+            };
+
+            let stream = tokio::net::windows::named_pipe::ClientOptions::new()
+                .open(&pipe_name)
+                .map_err(|e| Error::Ipc(format!("connect pipe failed: {e}")))?;
+
+            let (read, write) = tokio::io::split(stream);
+
+            Ok(Self::from_halves(Box::new(read), Box::new(write)))
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = path;
+            Err(Error::Ipc("unsupported platform".into()))
+        }
+    }
+
+    /// 从已拆分的 read/write 半边构造客户端。
+    fn from_halves(
+        read: Box<dyn AsyncRead + Unpin + Send>,
+        write: Box<dyn AsyncWrite + Unpin + Send>,
+    ) -> Self {
         let pending: Arc<Mutex<HashMap<String, oneshot::Sender<JsonRpcResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let pending_clone = pending.clone();
@@ -40,11 +90,11 @@ impl IpcClient {
             Self::recv_loop(read, pending_clone).await;
         });
 
-        Ok(Self {
+        Self {
             write: Arc::new(Mutex::new(write)),
             pending,
             next_id: Arc::new(AtomicU64::new(1)),
-        })
+        }
     }
 
     /// 调用远程方法，等待响应。
@@ -79,7 +129,7 @@ impl IpcClient {
     }
 
     async fn recv_loop(
-        mut read: OwnedReadHalf,
+        mut read: Box<dyn AsyncRead + Unpin + Send>,
         pending: Arc<Mutex<HashMap<String, oneshot::Sender<JsonRpcResponse>>>>,
     ) {
         loop {
@@ -105,28 +155,50 @@ mod tests {
     #[tokio::test]
     async fn timeout_when_no_server_response() {
         // 连接到一个不响应的服务端 -> 超时
-        // 用一个只接受连接但不读写的 listener
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("silent.sock");
-        // 真实 listener 但不处理请求
-        let lst = tokio::net::UnixListener::bind(&socket).unwrap();
-        let path = socket.clone();
-        tokio::spawn(async move {
-            // 接受连接但不响应
-            let _ = lst.accept().await;
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        });
 
-        let client = IpcClient::connect(&path).await.unwrap();
-        // 用很短的超时避免测试慢：直接调用，期望 30s 超时太长。
-        // 这里仅验证 client 能连接并发送；超时测试通过快速失败验证。
-        // 为加速，我们断言 call 最终返回错误（超时或断开）。
-        let r =
-            tokio::time::timeout(Duration::from_secs(2), client.call("noop", Value::Null)).await;
-        // 2s 内 call 仍在等待（30s 超时）-> 返回 Err(timeout) 表示外层超时
-        assert!(
-            r.is_err(),
-            "expected outer timeout while waiting for 30s ipc timeout"
-        );
+        #[cfg(unix)]
+        {
+            let lst = tokio::net::UnixListener::bind(&socket).unwrap();
+            let path = socket.clone();
+            tokio::spawn(async move {
+                let _ = lst.accept().await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            });
+
+            let client = IpcClient::connect(&path).await.unwrap();
+            let r = tokio::time::timeout(Duration::from_secs(2), client.call("noop", Value::Null))
+                .await;
+            assert!(
+                r.is_err(),
+                "expected outer timeout while waiting for 30s ipc timeout"
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            // Windows 上类似测试：创建 pipe 但不响应
+            use tokio::net::windows::named_pipe::ServerOptions;
+            let pipe_name = format!(r"\\.\pipe\r-code-{}", "silent.sock");
+            let server = ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&pipe_name)
+                .unwrap();
+
+            tokio::spawn(async move {
+                let _ = server.connect().await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            });
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let client = IpcClient::connect(&socket).await.unwrap();
+            let r = tokio::time::timeout(Duration::from_secs(2), client.call("noop", Value::Null))
+                .await;
+            assert!(
+                r.is_err(),
+                "expected outer timeout while waiting for 30s ipc timeout"
+            );
+        }
     }
 }

@@ -1,6 +1,6 @@
 {
   "publicContract": "v0.1.0",
-  "commit": "<immutable-commit: pinned-by-charter-and-hermes>",
+  "commit": "b6ac5d4326d43dda81d5e07b0c3e0e71721d64d0",
   "crates": [
     "hermes-error",
     "hermes-core",
@@ -14,7 +14,7 @@
   ],
   "validatedBy": {
     "agentCore": "cargo test --workspace",
-    "charter": "cargo test -p charter-contract-tests",
+    "r-code": "cargo test -p r-code-core -p r-code-store",
     "tinyHermes": "cargo test -p hermes-contract-tests"
   },
   "qualityGates": {
