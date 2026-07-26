@@ -33,6 +33,7 @@ pub enum ProviderConfig {
     DeepSeek {
         api_key: String,
         model: String,
+        base_url: Option<String>,
     },
 }
 
@@ -49,8 +50,12 @@ pub fn create_provider(config: ProviderConfig) -> Result<Box<dyn LlmProvider>> {
             model,
             base_url,
         } => Ok(Box::new(OpenAiProvider::new(api_key, model, base_url))),
-        ProviderConfig::DeepSeek { api_key, model } => {
-            Ok(Box::new(DeepSeekProvider::new(api_key, model)))
-        }
+        ProviderConfig::DeepSeek {
+            api_key,
+            model,
+            base_url,
+        } => Ok(Box::new(DeepSeekProvider::new_with_base_url(
+            api_key, model, base_url,
+        ))),
     }
 }

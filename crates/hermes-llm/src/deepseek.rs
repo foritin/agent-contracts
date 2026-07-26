@@ -10,12 +10,31 @@ const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 
 pub struct DeepSeekProvider {
     inner: OpenAiProvider,
+    max_context_tokens: u32,
 }
 
 impl DeepSeekProvider {
     pub fn new(api_key: String, model: String) -> Self {
+        Self::new_with_base_url(api_key, model, None)
+    }
+
+    /// 允许自定义兼容网关，同时保留 DeepSeek 官方地址作为安全默认值。
+    pub fn new_with_base_url(api_key: String, model: String, base_url: Option<String>) -> Self {
+        let max_context_tokens = if model
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("deepseek-v4-")
+        {
+            1_000_000
+        } else {
+            64_000
+        };
+        let base_url = base_url
+            .filter(|url| !url.trim().is_empty())
+            .unwrap_or_else(|| DEEPSEEK_BASE_URL.to_string());
         Self {
-            inner: OpenAiProvider::new(api_key, model, DEEPSEEK_BASE_URL.to_string()),
+            inner: OpenAiProvider::new(api_key, model, base_url),
+            max_context_tokens,
         }
     }
 }
@@ -39,7 +58,7 @@ impl LlmProvider for DeepSeekProvider {
             supports_tool_use: true,
             supports_vision: false,
             supports_prompt_caching: false,
-            max_context_tokens: 64_000,
+            max_context_tokens: self.max_context_tokens,
         }
     }
 
@@ -57,6 +76,12 @@ mod tests {
         let p = DeepSeekProvider::new("k".into(), "deepseek-chat".into());
         assert_eq!(p.name(), "deepseek");
         assert!(!p.capabilities().supports_prompt_caching);
+    }
+
+    #[test]
+    fn v4_advertises_one_million_token_context() {
+        let p = DeepSeekProvider::new("k".into(), "deepseek-v4-pro".into());
+        assert_eq!(p.capabilities().max_context_tokens, 1_000_000);
     }
 
     #[test]

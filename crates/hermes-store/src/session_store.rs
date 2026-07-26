@@ -70,6 +70,10 @@ impl SessionStore {
             match event {
                 SessionEvent::Meta(m) => meta = Some(m),
                 SessionEvent::Message(msg) => messages.push(msg),
+                // 快照包含运行时的完整 Message 工作集（包括 ToolUse / ToolResult）。
+                // 后续新追加的 Message 仍需保留，因此替换的是此前已重建的前缀而非
+                // 直接 return。
+                SessionEvent::HistorySnapshot { messages: snapshot } => messages = snapshot,
                 SessionEvent::Usage(u) => usage += u,
                 SessionEvent::ToolCall { .. } | SessionEvent::ToolResult { .. } => tool_calls += 1,
                 SessionEvent::System { .. } => {}
@@ -246,6 +250,42 @@ mod tests {
         assert_eq!(loaded.total_input_tokens, 10);
         assert_eq!(loaded.total_output_tokens, 5);
         assert_eq!(loaded.total_tool_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn history_snapshot_restores_complete_working_set_then_appends_new_messages() {
+        let (_d, store) = setup().await;
+        let session = store.create("model", "provider").await.unwrap();
+        let id = &session.meta.id;
+
+        store
+            .append(
+                id,
+                SessionEvent::Message(Message::user_text("obsolete prefix")),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                id,
+                SessionEvent::HistorySnapshot {
+                    messages: vec![Message::assistant_text("persisted answer")],
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                id,
+                SessionEvent::Message(Message::user_text("next question")),
+            )
+            .await
+            .unwrap();
+
+        let loaded = store.load(id).await.unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.messages[0].text_content(), "persisted answer");
+        assert_eq!(loaded.messages[1].text_content(), "next question");
     }
 
     #[tokio::test]

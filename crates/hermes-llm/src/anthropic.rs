@@ -36,7 +36,13 @@ impl AnthropicProvider {
     }
 
     fn messages_url(&self) -> String {
-        format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
+        let base_url = self.base_url.trim_end_matches('/');
+        let api_root = if base_url.ends_with("/v1") {
+            base_url.to_string()
+        } else {
+            format!("{base_url}/v1")
+        };
+        format!("{api_root}/messages")
     }
 
     /// 将内部请求转为 Anthropic Messages API 请求体。
@@ -490,6 +496,31 @@ fn parse_one_sse(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn messages_url_accepts_root_or_v1_base_url() {
+        let from_root = AnthropicProvider::new(
+            "sk-ant-test".into(),
+            "test-model".into(),
+            Some("https://api.example.com".into()),
+        )
+        .unwrap();
+        let from_v1 = AnthropicProvider::new(
+            "sk-ant-test".into(),
+            "test-model".into(),
+            Some("https://api.example.com/v1/".into()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            from_root.messages_url(),
+            "https://api.example.com/v1/messages"
+        );
+        assert_eq!(
+            from_v1.messages_url(),
+            "https://api.example.com/v1/messages"
+        );
+    }
 
     #[test]
     fn message_conversion_preserves_text() {

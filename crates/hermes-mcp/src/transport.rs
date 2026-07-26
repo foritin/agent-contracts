@@ -308,9 +308,14 @@ mod tests {
         // V-TOOL-03 / test-integ-mcpstdio：stdio 子进程退出后，调用返回可诊断错误
         // 进程读一行后立即退出，不响应 -> 读到 EOF -> NotConnected
         let env = HashMap::new();
-        let transport = StdioTransport::spawn("sh", &["-c".into(), "read x; exit 0".into()], &env)
+        let (program, args) = if cfg!(windows) {
+            ("cmd", vec!["/C".into(), "set /p x=& exit /b 0".into()])
+        } else {
+            ("sh", vec!["-c".into(), "read x; exit 0".into()])
+        };
+        let transport = StdioTransport::spawn(program, &args, &env)
             .await
-            .expect("spawn sh");
+            .expect("spawn test process");
 
         let err = transport
             .request("initialize", None)

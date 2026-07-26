@@ -55,6 +55,13 @@ pub enum SessionEvent {
         #[serde(default)]
         is_error: bool,
     },
+    /// 当前运行工作集的无损快照。
+    ///
+    /// 工具调用同时会保留为独立审计事件；快照专用于在应用重启、运行时重建或
+    /// 会话分叉后恢复 provider 所需的完整 Message/ToolUse/ToolResult 配对。
+    HistorySnapshot {
+        messages: Vec<Message>,
+    },
     System {
         event: String,
         data: Value,
@@ -142,6 +149,39 @@ mod tests {
             SessionEvent::ToolResult { is_error, .. } => assert!(!is_error),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn history_snapshot_roundtrips_tool_protocol_messages() {
+        let ev = SessionEvent::HistorySnapshot {
+            messages: vec![
+                Message {
+                    role: crate::Role::Assistant,
+                    content: vec![crate::ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "read_file".into(),
+                        input: serde_json::json!({"path": "src/lib.rs"}),
+                    }],
+                },
+                Message {
+                    role: crate::Role::User,
+                    content: vec![crate::ContentBlock::ToolResult {
+                        tool_use_id: "t1".into(),
+                        content: "contents".into(),
+                        is_error: false,
+                    }],
+                },
+            ],
+        };
+
+        let encoded = serde_json::to_string(&ev).unwrap();
+        let decoded: SessionEvent = serde_json::from_str(&encoded).unwrap();
+        let SessionEvent::HistorySnapshot { messages } = decoded else {
+            panic!("wrong event variant");
+        };
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].content[0].is_tool_use());
+        assert!(messages[1].content[0].is_tool_result());
     }
 
     #[test]

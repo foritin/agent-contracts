@@ -36,7 +36,28 @@ impl IpcClient {
     ///
     /// - Unix: 连接 Unix Socket 文件。
     /// - Windows: 连接 Named Pipe（路径自动转换为 pipe 名称）。
+    ///
+    /// Windows 下 pipe 实例在服务端 `serve()` 中才创建，客户端在服务端刚启动时
+    /// 连接会遇到短暂的 NotFound/Busy —— 这里统一做有限重试（30 × 100ms）。
     pub async fn connect(path: &Path) -> Result<Self> {
+        const MAX_ATTEMPTS: u32 = 30;
+        let mut last_err = None;
+        for attempt in 0..MAX_ATTEMPTS {
+            match Self::connect_once(path).await {
+                Ok(client) => return Ok(client),
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt + 1 < MAX_ATTEMPTS {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| Error::Ipc("connect failed".into())))
+    }
+
+    /// 单次连接尝试（平台实现）。
+    async fn connect_once(path: &Path) -> Result<Self> {
         #[cfg(unix)]
         {
             let stream = tokio::net::UnixStream::connect(path)

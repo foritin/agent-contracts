@@ -56,6 +56,18 @@ pub trait ToolHost: Send + Sync {
     /// 执行工具调用。
     async fn call(&self, name: &str, args: Value) -> Result<ToolCallOutcome>;
 
+    /// 执行带模型工具调用 ID 的调用。
+    ///
+    /// 默认实现保持旧 ToolHost 兼容；需要把派生资源关联到原始调用的宿主可覆盖它。
+    async fn call_with_id(
+        &self,
+        _call_id: &str,
+        name: &str,
+        args: Value,
+    ) -> Result<ToolCallOutcome> {
+        self.call(name, args).await
+    }
+
     /// 批量执行（默认串行；可被覆盖为并行）。
     async fn call_batch(&self, calls: Vec<(String, Value)>) -> Vec<Result<ToolCallOutcome>> {
         let mut results = Vec::with_capacity(calls.len());
