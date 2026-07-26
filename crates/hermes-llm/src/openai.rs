@@ -10,6 +10,8 @@ use hermes_core::{
 use hermes_error::{Error, Result};
 use serde_json::{json, Value};
 
+use crate::url::openai_api_root;
+
 const MAX_ERROR_MESSAGE_CHARS: usize = 240;
 const MAX_ERROR_METADATA_CHARS: usize = 64;
 
@@ -33,13 +35,9 @@ impl OpenAiProvider {
     }
 
     fn completions_url(&self) -> String {
-        let base_url = self.base_url.trim_end_matches('/');
-        let api_root = if base_url.ends_with("/v1") {
-            base_url.to_string()
-        } else {
-            format!("{base_url}/v1")
-        };
-        format!("{api_root}/chat/completions")
+        // 版本段由 base_url 自带（/v1、/v3、/v4、/compatible-mode/v1 …），
+        // 只有裸域名才补 /v1。规则与理由见 `crate::url`。
+        format!("{}/chat/completions", openai_api_root(&self.base_url))
     }
 
     /// 官方 OpenAI 端点支持在流末额外返回 usage；兼容接口不假定支持该扩展。
@@ -318,7 +316,9 @@ struct OpenAiErrorDetails {
 }
 
 /// 将 OpenAI 风格的错误负载压缩为可展示文本，避免把原始 JSON 交给调用方。
-fn map_api_error(status: u16, body: &str, api_key: &str) -> Error {
+///
+/// Responses provider 复用同一套错误归一化与密钥脱敏，不另写一份。
+pub(crate) fn map_api_error(status: u16, body: &str, api_key: &str) -> Error {
     let message = normalize_api_error(body, api_key);
     match status {
         401 | 403 => Error::AuthFailed("authentication failed (check api_key)".into()),
@@ -400,7 +400,7 @@ fn json_scalar_to_string(value: &Value) -> Option<String> {
     }
 }
 
-fn sanitize_transport_error(message: &str, api_key: &str) -> String {
+pub(crate) fn sanitize_transport_error(message: &str, api_key: &str) -> String {
     sanitize_error_value(message, api_key, MAX_ERROR_MESSAGE_CHARS)
 }
 
@@ -670,6 +670,24 @@ mod tests {
             from_v1.completions_url(),
             "https://api.example.com/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn completions_url_keeps_vendor_version_segments() {
+        // 智谱 Coding Plan 用 /v4，火山方舟套餐用 /api/coding/v3，
+        // 百炼用 /compatible-mode/v1。旧的"结尾不是 /v1 就补 /v1"会把前两个
+        // 拼成 .../v4/v1/chat/completions → 404。
+        for base in [
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+            "https://ark.cn-beijing.volces.com/api/coding/v3",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        ] {
+            let provider = OpenAiProvider::new("k".into(), "m".into(), base.into());
+            assert_eq!(
+                provider.completions_url(),
+                format!("{base}/chat/completions")
+            );
+        }
     }
 
     #[test]

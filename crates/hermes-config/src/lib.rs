@@ -44,6 +44,18 @@ pub struct ProviderConfig {
     pub max_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// 线路协议（wire protocol）：`anthropic_messages` / `openai_chat` /
+    /// `openai_responses`。决定请求体形状、SSE 事件格式和鉴权头。
+    ///
+    /// **这是用户显式选择的值，不是推导出来的。** 同一个 base_url 常常同时支持多种
+    /// 协议（火山方舟 `/api/coding` 是 Anthropic 口、`/api/coding/v3` 是 OpenAI 口），
+    /// 计费和能力都不同，只能由用户决定走哪个。
+    ///
+    /// `None` = 尚未选择（升级前保存的旧配置）。此时由调用方决定回退策略——
+    /// R-Code 的做法见 `commands.rs::build_provider_config`：按目录推断，但绝不
+    /// 自动选中 Responses。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
 }
 
 impl fmt::Debug for ProviderConfig {
@@ -54,6 +66,7 @@ impl fmt::Debug for ProviderConfig {
             .field("model", &self.model)
             .field("max_tokens", &self.max_tokens)
             .field("temperature", &self.temperature)
+            .field("protocol", &self.protocol)
             .finish()
     }
 }
@@ -367,6 +380,7 @@ memories_dir = "/tmp/h/m"
             model: "claude".into(),
             max_tokens: None,
             temperature: None,
+            protocol: None,
         };
         let dbg = format!("{:?}", config);
         assert!(!dbg.contains("sk-secret-12345"), "api_key leaked: {dbg}");
@@ -385,6 +399,7 @@ memories_dir = "/tmp/h/m"
                 model: "m".into(),
                 max_tokens: None,
                 temperature: None,
+                protocol: None,
             },
         );
         let r = config.validate();
@@ -403,6 +418,7 @@ memories_dir = "/tmp/h/m"
                 model: "m".into(),
                 max_tokens: None,
                 temperature: None,
+                protocol: None,
             },
         );
         let r = config.validate();

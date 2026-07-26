@@ -127,6 +127,7 @@ mod tests {
                         model: "m".into(),
                         max_tokens: None,
                         temperature: None,
+                        protocol: None,
                     },
                 );
                 m
