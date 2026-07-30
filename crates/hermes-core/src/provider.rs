@@ -29,6 +29,20 @@ pub trait LlmProvider: Send + Sync {
 }
 
 /// 完成请求。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InferenceOptions {
+    /// Provider 原生思考模式：enabled / disabled / adaptive。None 表示服务默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    /// 推理强度：none / minimal / low / medium / high / xhigh / max。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// 输出详略：low / medium / high。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verbosity: Option<String>,
+}
+
+/// 完成请求。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
     pub model: String,
@@ -43,6 +57,15 @@ pub struct CompletionRequest {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub enable_caching: bool,
+    /// 会话级模型推理参数；全部为空时完全沿用 Provider 默认行为。
+    #[serde(default, skip_serializing_if = "InferenceOptions::is_default")]
+    pub inference: InferenceOptions,
+}
+
+impl InferenceOptions {
+    pub fn is_default(&self) -> bool {
+        self.thinking.is_none() && self.reasoning_effort.is_none() && self.verbosity.is_none()
+    }
 }
 
 /// 完成响应。

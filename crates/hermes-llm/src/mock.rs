@@ -181,6 +181,7 @@ mod tests {
             max_tokens: 128,
             temperature: None,
             enable_caching: false,
+            inference: Default::default(),
         }
     }
 

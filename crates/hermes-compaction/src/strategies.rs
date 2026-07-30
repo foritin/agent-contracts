@@ -131,6 +131,7 @@ impl CompactionStrategy for LlmSummaryCompaction {
                 max_tokens: 2048,
                 temperature: Some(0.3),
                 enable_caching: false,
+                inference: Default::default(),
             })
             .await?;
 

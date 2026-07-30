@@ -106,6 +106,12 @@ impl ResponsesProvider {
         if let Some(temp) = request.temperature {
             body["temperature"] = json!(temp);
         }
+        if let Some(effort) = request.inference.reasoning_effort.as_deref() {
+            body["reasoning"] = json!({ "effort": effort });
+        }
+        if let Some(verbosity) = request.inference.verbosity.as_deref() {
+            body["text"] = json!({ "verbosity": verbosity });
+        }
         if stream {
             body["stream"] = json!(true);
         }
@@ -757,6 +763,7 @@ mod tests {
             max_tokens: 1024,
             temperature: None,
             enable_caching: false,
+            inference: Default::default(),
         }
     }
 
@@ -784,6 +791,20 @@ mod tests {
         assert_eq!(body["max_output_tokens"], 1024);
         assert!(body.get("max_tokens").is_none());
         assert_eq!(body["store"], false);
+    }
+
+    #[test]
+    fn inference_options_use_responses_reasoning_and_text_objects() {
+        let mut req = request(vec![]);
+        req.inference = hermes_core::InferenceOptions {
+            thinking: None,
+            reasoning_effort: Some("high".into()),
+            verbosity: Some("low".into()),
+        };
+
+        let body = provider("https://api.openai.com").build_body(&req, false);
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["text"]["verbosity"], "low");
     }
 
     #[test]

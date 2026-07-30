@@ -61,6 +61,17 @@ impl AnthropicProvider {
         if let Some(temp) = request.temperature {
             body["temperature"] = json!(temp);
         }
+        if let Some(thinking) = request.inference.thinking.as_deref() {
+            body["thinking"] = json!({ "type": thinking });
+        } else if request.inference.reasoning_effort.is_some()
+            && request.model.to_ascii_lowercase().contains("claude")
+        {
+            // Claude 4.6+ / 5 的 effort 必须与 adaptive thinking 一起使用。
+            body["thinking"] = json!({ "type": "adaptive" });
+        }
+        if let Some(effort) = request.inference.reasoning_effort.as_deref() {
+            body["output_config"] = json!({ "effort": effort });
+        }
         if !request.tools.is_empty() {
             body["tools"] = json!(request
                 .tools
@@ -520,6 +531,30 @@ mod tests {
             from_v1.messages_url(),
             "https://api.example.com/v1/messages"
         );
+    }
+
+    #[test]
+    fn claude_effort_enables_adaptive_thinking() {
+        let provider =
+            AnthropicProvider::new("sk-ant-test".into(), "claude-opus-4-6".into(), None).unwrap();
+        let request = CompletionRequest {
+            model: "claude-opus-4-6".into(),
+            system: None,
+            messages: vec![Message::user_text("hi")],
+            tools: vec![],
+            max_tokens: 1024,
+            temperature: None,
+            enable_caching: false,
+            inference: hermes_core::InferenceOptions {
+                thinking: None,
+                reasoning_effort: Some("high".into()),
+                verbosity: None,
+            },
+        };
+
+        let body = provider.build_request_body(&request);
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "high");
     }
 
     #[test]

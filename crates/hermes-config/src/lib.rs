@@ -30,6 +30,10 @@ pub struct Config {
     #[serde(default = "default_compaction")]
     pub compaction: CompactionConfig,
 
+    /// 主 Agent、跨引擎委派与结果复核策略。
+    #[serde(default)]
+    pub orchestration: OrchestrationConfig,
+
     #[serde(default)]
     pub tauri: Option<TauriConfig>,
 }
@@ -103,6 +107,85 @@ pub struct TauriConfig {
     pub font_size: u32,
 }
 
+/// Agent 编排设置。所有自动决策都必须在运行事件中公开策略结论。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestrationConfig {
+    /// 新会话默认由哪一个主 Agent 执行。
+    #[serde(default)]
+    pub default_agent_engine: MainAgentEngine,
+    /// `delegate_task(agent="auto")` 的路由策略。
+    #[serde(default)]
+    pub delegation_router: DelegationRouterMode,
+    /// 是否允许两个 Agent 引擎互相委派。关闭后只允许同引擎子智能体。
+    #[serde(default = "default_true")]
+    pub allow_cross_engine_delegation: bool,
+    /// 主回复完成后的显式质量复核策略。
+    #[serde(default)]
+    pub quality_loop: QualityLoopMode,
+    /// 执行质量复核的引擎。
+    #[serde(default)]
+    pub quality_reviewer: QualityReviewer,
+    /// 最多复核/修订轮数；产品层限制为 1..=3。
+    #[serde(default = "default_review_rounds")]
+    pub max_review_rounds: u8,
+}
+
+impl Default for OrchestrationConfig {
+    fn default() -> Self {
+        Self {
+            default_agent_engine: MainAgentEngine::RCode,
+            delegation_router: DelegationRouterMode::Balanced,
+            allow_cross_engine_delegation: true,
+            quality_loop: QualityLoopMode::Auto,
+            quality_reviewer: QualityReviewer::Auto,
+            max_review_rounds: default_review_rounds(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MainAgentEngine {
+    #[default]
+    RCode,
+    Codex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationRouterMode {
+    /// 只有模型显式选择某个执行器时才路由；auto 回退当前 R-Code 引擎。
+    Manual,
+    /// 简单任务使用 R-Code，复杂任务优先 Codex；Codex 不可用时安全回退。
+    #[default]
+    Balanced,
+    /// 除非明确标注复杂，否则优先 R-Code。
+    RCodeFirst,
+    /// 除非明确标注简单，否则优先 Codex。
+    CodexFirst,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QualityLoopMode {
+    Off,
+    /// 仅工具型/工作区任务完成后复核。
+    #[default]
+    Auto,
+    /// 每一轮主回复都复核。
+    Always,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QualityReviewer {
+    /// 与主执行器交叉复核；不可用时回退 R-Code。
+    #[default]
+    Auto,
+    RCode,
+    Codex,
+}
+
 /// MCP server 规格（config 自有版本，不依赖 hermes-mcp）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -144,6 +227,12 @@ fn default_theme() -> String {
 fn default_font_size() -> u32 {
     13
 }
+fn default_true() -> bool {
+    true
+}
+fn default_review_rounds() -> u8 {
+    1
+}
 
 fn default_storage() -> StorageConfig {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -184,6 +273,7 @@ impl Default for Config {
                 max_context_tokens: default_max_context(),
                 trigger_threshold: default_trigger(),
             },
+            orchestration: OrchestrationConfig::default(),
             tauri: None,
         }
     }
@@ -231,6 +321,11 @@ impl Config {
 
     /// 校验。
     pub fn validate(&self) -> Result<()> {
+        if !(1..=3).contains(&self.orchestration.max_review_rounds) {
+            return Err(Error::Config(
+                "orchestration.max_review_rounds must be between 1 and 3".to_string(),
+            ));
+        }
         if !self.providers.contains_key(&self.default_provider) {
             return Err(Error::Config(format!(
                 "default provider '{}' not configured",

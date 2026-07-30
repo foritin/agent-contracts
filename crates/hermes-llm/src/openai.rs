@@ -68,8 +68,24 @@ impl OpenAiProvider {
             "messages": messages,
             "max_tokens": request.max_tokens,
         });
-        if let Some(temp) = request.temperature {
+        let model_lower = request.model.to_ascii_lowercase();
+        let deepseek_thinking = model_lower.contains("deepseek")
+            && matches!(request.inference.thinking.as_deref(), Some("enabled"));
+        if let Some(temp) = request.temperature.filter(|_| !deepseek_thinking) {
             body["temperature"] = json!(temp);
+        }
+        if let Some(thinking) = request.inference.thinking.as_deref() {
+            if model_lower.contains("qwen") {
+                body["enable_thinking"] = json!(thinking != "disabled");
+            } else {
+                body["thinking"] = json!({ "type": thinking });
+            }
+        }
+        if let Some(effort) = request.inference.reasoning_effort.as_deref() {
+            body["reasoning_effort"] = json!(effort);
+        }
+        if let Some(verbosity) = request.inference.verbosity.as_deref() {
+            body["verbosity"] = json!(verbosity);
         }
         if stream {
             body["stream"] = json!(true);
@@ -701,6 +717,7 @@ mod tests {
             max_tokens: 16,
             temperature: None,
             enable_caching: false,
+            inference: Default::default(),
         };
         let body = p.build_body(&req, false);
         let msgs = body["messages"].as_array().unwrap();
@@ -708,6 +725,60 @@ mod tests {
         assert_eq!(msgs[0]["content"], "be nice");
         assert_eq!(msgs[1]["role"], "user");
         assert_eq!(body["max_tokens"], 16);
+    }
+
+    #[test]
+    fn deepseek_inference_options_use_thinking_and_omit_temperature() {
+        let p = OpenAiProvider::new(
+            "k".into(),
+            "deepseek-v4-pro".into(),
+            "https://api.deepseek.com".into(),
+        );
+        let req = CompletionRequest {
+            model: "deepseek-v4-pro".into(),
+            system: None,
+            messages: vec![Message::user_text("hi")],
+            tools: vec![],
+            max_tokens: 16,
+            temperature: Some(0.7),
+            enable_caching: false,
+            inference: hermes_core::InferenceOptions {
+                thinking: Some("enabled".into()),
+                reasoning_effort: Some("high".into()),
+                verbosity: None,
+            },
+        };
+
+        let body = p.build_body(&req, false);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn qwen_thinking_uses_compatible_enable_thinking_flag() {
+        let p = OpenAiProvider::new(
+            "k".into(),
+            "qwen3-max".into(),
+            "https://dashscope.aliyuncs.com/compatible-mode/v1".into(),
+        );
+        let req = CompletionRequest {
+            model: "qwen3-max".into(),
+            system: None,
+            messages: vec![],
+            tools: vec![],
+            max_tokens: 16,
+            temperature: None,
+            enable_caching: false,
+            inference: hermes_core::InferenceOptions {
+                thinking: Some("enabled".into()),
+                ..Default::default()
+            },
+        };
+
+        let body = p.build_body(&req, false);
+        assert_eq!(body["enable_thinking"], true);
+        assert!(body.get("thinking").is_none());
     }
 
     #[test]
@@ -720,6 +791,7 @@ mod tests {
             max_tokens: 16,
             temperature: None,
             enable_caching: false,
+            inference: Default::default(),
         };
         let official = OpenAiProvider::new(
             "sk-test".into(),
