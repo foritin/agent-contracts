@@ -219,6 +219,33 @@ fn content_block_to_anthropic(b: &ContentBlock) -> Value {
             v
         }
         ContentBlock::Image { source } => json!({ "type": "image", "source": source }),
+        ContentBlock::File { source } if source.media_type.starts_with("image/") => json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": source.media_type,
+                "data": source.data.as_deref().unwrap_or_default(),
+            }
+        }),
+        ContentBlock::File { source } if source.media_type == "application/pdf" => json!({
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": source.media_type,
+                "data": source.data.as_deref().unwrap_or_default(),
+            },
+            "title": source.name,
+        }),
+        ContentBlock::File { source } => json!({
+            "type": "text",
+            "text": format!(
+                "\n\n--- Attached file: {} ({}) ---\n{}\n--- End attached file: {} ---",
+                source.name,
+                source.media_type,
+                source.text.as_deref().unwrap_or_default(),
+                source.name,
+            )
+        }),
         // 产品层扩展块降级为占位文本（公共层不解释语义）
         ContentBlock::Custom { type_name, data } => json!({
             "type": "text",
@@ -592,6 +619,25 @@ mod tests {
         let v = message_to_anthropic(&m);
         assert_eq!(v["content"][0]["type"], "text");
         assert!(v["content"][0]["text"].as_str().unwrap().contains("custom"));
+    }
+
+    #[test]
+    fn pdf_attachment_becomes_anthropic_document_input() {
+        let m = Message {
+            role: Role::User,
+            content: vec![ContentBlock::File {
+                source: hermes_core::FileSource {
+                    kind: "base64".into(),
+                    name: "spec.pdf".into(),
+                    media_type: "application/pdf".into(),
+                    text: None,
+                    data: Some("JVBERi0=".into()),
+                },
+            }],
+        };
+        let value = message_to_anthropic(&m);
+        assert_eq!(value["content"][0]["type"], "document");
+        assert_eq!(value["content"][0]["title"], "spec.pdf");
     }
 
     #[test]

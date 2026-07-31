@@ -115,6 +115,13 @@ pub enum ContentBlock {
     /// 图像。
     Image { source: ImageSource },
 
+    /// 用户附加的可读文件。
+    ///
+    /// 文本类文件直接保留 UTF-8 正文；二进制文档（目前为 PDF）使用 Base64。
+    /// Provider 适配层负责映射为原生 document/file 输入，或将文本文件展开为
+    /// 普通文本块。文件名仅用于向模型说明来源，不参与本地路径解析。
+    File { source: FileSource },
+
     /// 产品层扩展块（如文件引用、选区引用等）。公共层不解释其语义，
     /// 仅保证可序列化与透传；Provider 适配层将其降级为占位文本。
     Custom {
@@ -130,6 +137,7 @@ impl ContentBlock {
     pub fn as_text(&self) -> Option<&str> {
         match self {
             ContentBlock::Text { text } => Some(text),
+            ContentBlock::File { source } => source.text.as_deref(),
             _ => None,
         }
     }
@@ -175,6 +183,11 @@ impl ContentBlock {
             ContentBlock::Thinking { thinking, .. } => (thinking.len() / 4) as u32,
             ContentBlock::ToolUse { input, .. } => (input.to_string().len() / 4) as u32,
             ContentBlock::ToolResult { content, .. } => (content.len() / 4) as u32,
+            ContentBlock::File { source } => source
+                .text
+                .as_deref()
+                .map(|text| (text.len() / 4) as u32)
+                .unwrap_or(10),
             _ => 10,
         }
     }
@@ -198,6 +211,19 @@ pub struct ImageSource {
     pub data: String,
 }
 
+/// 文件来源。`kind` 为 `text` 或 `base64`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileSource {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
+    pub media_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +243,22 @@ mod tests {
         assert!(json.contains(r#""type":"text""#));
         let back: ContentBlock = serde_json::from_str(&json).unwrap();
         assert_eq!(back.as_text(), Some("hi"));
+    }
+
+    #[test]
+    fn file_block_roundtrip_keeps_safe_metadata_and_text() {
+        let block = ContentBlock::File {
+            source: FileSource {
+                kind: "text".into(),
+                name: "main.rs".into(),
+                media_type: "text/x-rust".into(),
+                text: Some("fn main() {}".into()),
+                data: None,
+            },
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        let back: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.as_text(), Some("fn main() {}"));
     }
 
     #[test]

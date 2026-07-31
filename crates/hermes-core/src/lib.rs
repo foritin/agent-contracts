@@ -22,7 +22,7 @@ pub use hermes_error::{
 };
 
 pub use compaction::CompactionStrategy;
-pub use message::{ContentBlock, ImageSource, Message, Role};
+pub use message::{ContentBlock, FileSource, ImageSource, Message, Role};
 pub use provider::{
     Capabilities, CompletionRequest, CompletionResponse, InferenceOptions, LlmProvider, StopReason,
     StreamEvent,

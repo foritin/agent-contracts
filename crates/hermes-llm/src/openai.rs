@@ -215,12 +215,94 @@ pub fn messages_to_openai(msg: &Message) -> Vec<Value> {
         })];
     }
 
-    // 普通文本消息
+    // 多模态 user 消息必须使用 content parts；纯文本继续保留字符串形态，以兼容
+    // 实现不完整的 OpenAI-compatible 网关。
     let role = match msg.role {
         Role::User => "user",
         Role::Assistant => "assistant",
     };
-    vec![json!({ "role": role, "content": msg.text_content() })]
+    if msg.role == Role::User
+        && msg.content.iter().any(|block| {
+            matches!(block, ContentBlock::Image { .. })
+                || matches!(
+                    block,
+                    ContentBlock::File { source }
+                        if source.media_type.starts_with("image/")
+                )
+        })
+    {
+        let content = msg
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } if !text.is_empty() => {
+                    Some(json!({ "type": "text", "text": text }))
+                }
+                ContentBlock::Image { source } => Some(json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{};base64,{}", source.media_type, source.data),
+                    }
+                })),
+                ContentBlock::File { source }
+                    if source.media_type.starts_with("image/") && source.data.is_some() =>
+                {
+                    Some(json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!(
+                                "data:{};base64,{}",
+                                source.media_type,
+                                source.data.as_deref().unwrap_or_default()
+                            ),
+                        }
+                    }))
+                }
+                ContentBlock::File { source } if source.kind == "text" => Some(json!({
+                    "type": "text",
+                    "text": attached_file_text(source),
+                })),
+                ContentBlock::File { source } => Some(json!({
+                    "type": "text",
+                    "text": format!(
+                        "[Attached file: {} ({}) — this Chat Completions route cannot read the binary body]",
+                        source.name, source.media_type
+                    ),
+                })),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        return vec![json!({ "role": role, "content": content })];
+    }
+    vec![json!({ "role": role, "content": text_content_with_files(msg) })]
+}
+
+fn attached_file_text(source: &hermes_core::FileSource) -> String {
+    format!(
+        "\n\n--- Attached file: {} ({}) ---\n{}\n--- End attached file: {} ---",
+        source.name,
+        source.media_type,
+        source.text.as_deref().unwrap_or_default(),
+        source.name,
+    )
+}
+
+fn text_content_with_files(msg: &Message) -> String {
+    msg.content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.clone()),
+            ContentBlock::File { source } if source.kind == "text" => {
+                Some(attached_file_text(source))
+            }
+            ContentBlock::File { source } => Some(format!(
+                "\n\n[Attached file: {} ({}) — this Chat Completions route cannot read the binary body]",
+                source.name, source.media_type
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 /// 将单条内部消息转换为一个 OpenAI 消息。
@@ -867,6 +949,54 @@ mod tests {
         assert_eq!(messages[0]["tool_call_id"], "t1");
         assert_eq!(messages[1]["role"], "tool");
         assert_eq!(messages[1]["tool_call_id"], "t2");
+    }
+
+    #[test]
+    fn user_image_is_emitted_as_data_url_content_part() {
+        let message = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "look".into(),
+                },
+                ContentBlock::Image {
+                    source: hermes_core::ImageSource {
+                        kind: "base64".into(),
+                        media_type: "image/png".into(),
+                        data: "iVBORw0KGgo=".into(),
+                    },
+                },
+            ],
+        };
+        let messages = messages_to_openai(&message);
+        assert_eq!(messages[0]["content"][0]["type"], "text");
+        assert_eq!(messages[0]["content"][1]["type"], "image_url");
+        assert_eq!(
+            messages[0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,iVBORw0KGgo="
+        );
+    }
+
+    #[test]
+    fn text_attachment_is_flattened_for_chat_compatible_routes() {
+        let message = Message {
+            role: Role::User,
+            content: vec![ContentBlock::File {
+                source: hermes_core::FileSource {
+                    kind: "text".into(),
+                    name: "main.rs".into(),
+                    media_type: "text/x-rust".into(),
+                    text: Some("fn main() {}".into()),
+                    data: None,
+                },
+            }],
+        };
+        let messages = messages_to_openai(&message);
+        assert_eq!(messages[0]["role"], "user");
+        assert!(messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Attached file: main.rs"));
     }
 
     #[test]

@@ -247,11 +247,59 @@ pub fn message_to_items(msg: &Message, reasoning: ReasoningMode) -> Vec<Value> {
                 }
             }
             if !has_tool_result {
-                let text = msg.text_content();
+                let content = msg
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } if !text.is_empty() => {
+                            Some(json!({ "type": "input_text", "text": text }))
+                        }
+                        ContentBlock::Image { source } => Some(json!({
+                            "type": "input_image",
+                            "image_url": format!("data:{};base64,{}", source.media_type, source.data),
+                        })),
+                        ContentBlock::File { source }
+                            if source.media_type.starts_with("image/") && source.data.is_some() =>
+                        {
+                            Some(json!({
+                                "type": "input_image",
+                                "image_url": format!(
+                                    "data:{};base64,{}",
+                                    source.media_type,
+                                    source.data.as_deref().unwrap_or_default()
+                                ),
+                            }))
+                        }
+                        ContentBlock::File { source }
+                            if source.media_type == "application/pdf" && source.data.is_some() =>
+                        {
+                            Some(json!({
+                                "type": "input_file",
+                                "filename": source.name,
+                                "file_data": format!(
+                                    "data:{};base64,{}",
+                                    source.media_type,
+                                    source.data.as_deref().unwrap_or_default()
+                                ),
+                            }))
+                        }
+                        ContentBlock::File { source } if source.kind == "text" => Some(json!({
+                            "type": "input_text",
+                            "text": format!(
+                                "\n\n--- Attached file: {} ({}) ---\n{}\n--- End attached file: {} ---",
+                                source.name,
+                                source.media_type,
+                                source.text.as_deref().unwrap_or_default(),
+                                source.name,
+                            ),
+                        })),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
                 items.push(json!({
                     "type": "message",
                     "role": "user",
-                    "content": [{ "type": "input_text", "text": text }],
+                    "content": content,
                 }));
             }
         }
@@ -879,6 +927,32 @@ mod tests {
     }
 
     #[test]
+    fn user_image_is_emitted_as_input_image() {
+        let message = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "look".into(),
+                },
+                ContentBlock::Image {
+                    source: hermes_core::ImageSource {
+                        kind: "base64".into(),
+                        media_type: "image/webp".into(),
+                        data: "UklGRg==".into(),
+                    },
+                },
+            ],
+        };
+        let items = message_to_items(&message, ReasoningMode::Drop);
+        assert_eq!(items[0]["content"][0]["type"], "input_text");
+        assert_eq!(items[0]["content"][1]["type"], "input_image");
+        assert_eq!(
+            items[0]["content"][1]["image_url"],
+            "data:image/webp;base64,UklGRg=="
+        );
+    }
+
+    #[test]
     fn orphan_function_call_output_is_dropped() {
         let items = vec![
             json!({"type": "function_call", "call_id": "call_1", "name": "a", "arguments": "{}"}),
@@ -1134,5 +1208,24 @@ mod tests {
                 .max_context_tokens,
             400_000
         );
+    }
+
+    #[test]
+    fn pdf_attachment_becomes_an_input_file() {
+        let message = Message {
+            role: Role::User,
+            content: vec![ContentBlock::File {
+                source: hermes_core::FileSource {
+                    kind: "base64".into(),
+                    name: "spec.pdf".into(),
+                    media_type: "application/pdf".into(),
+                    text: None,
+                    data: Some("JVBERi0=".into()),
+                },
+            }],
+        };
+        let items = message_to_items(&message, ReasoningMode::Drop);
+        assert_eq!(items[0]["content"][0]["type"], "input_file");
+        assert_eq!(items[0]["content"][0]["filename"], "spec.pdf");
     }
 }
