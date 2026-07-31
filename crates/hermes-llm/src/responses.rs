@@ -1195,6 +1195,65 @@ mod tests {
     }
 
     #[test]
+    fn error_frames_support_compatible_message_shapes() {
+        let cases = [
+            (
+                r#"{"type":"error","error":{"message":"nested error"}}"#,
+                "nested error",
+            ),
+            (
+                r#"{"type":"error","message":"top-level error"}"#,
+                "top-level error",
+            ),
+            (r#"{"type":"error"}"#, "response failed"),
+        ];
+
+        for (frame, expected) in cases {
+            let events = run_stream(&[frame]);
+            assert_eq!(events.len(), 1);
+            assert!(matches!(
+                &events[0],
+                StreamEvent::Stop { reason: StopReason::Other(message) } if message == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn terminal_frames_emit_stop_only_once() {
+        let completed_then_errors = run_stream(&[
+            r#"{"type":"response.completed","sequence_number":1,
+                "response":{"status":"completed","output":[],"usage":{}}}"#,
+            r#"{"type":"response.failed","sequence_number":2,
+                "response":{"error":{"message":"late failure"}}}"#,
+            r#"{"type":"error","sequence_number":3,"message":"late error"}"#,
+        ]);
+        assert_eq!(
+            completed_then_errors
+                .iter()
+                .filter(|event| matches!(event, StreamEvent::Stop { .. }))
+                .count(),
+            1
+        );
+
+        let failure_then_errors = run_stream(&[
+            r#"{"type":"response.failed","sequence_number":1,
+                "response":{"error":{"message":"first failure"}}}"#,
+            r#"{"type":"error","sequence_number":2,"message":"late error"}"#,
+            r#"{"type":"response.failed","sequence_number":3,
+                "response":{"error":{"message":"later failure"}}}"#,
+        ]);
+        let stops: Vec<_> = failure_then_errors
+            .iter()
+            .filter(|event| matches!(event, StreamEvent::Stop { .. }))
+            .collect();
+        assert_eq!(stops.len(), 1);
+        assert!(matches!(
+            stops[0],
+            StreamEvent::Stop { reason: StopReason::Other(message) } if message == "first failure"
+        ));
+    }
+
+    #[test]
     fn capabilities_and_name() {
         let provider = provider("https://api.openai.com");
         assert_eq!(provider.name(), "openai_responses");
