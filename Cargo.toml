@@ -17,8 +17,8 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
-repository = "https://github.com/charter/agent-core"
-authors = ["Charter & Tiny Hermes shared team"]
+repository = "https://github.com/foritin/agent-core"
+authors = ["R-Code & Tiny Hermes shared team"]
 
 [workspace.dependencies]
 # 异步运行时

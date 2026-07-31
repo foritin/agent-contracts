@@ -3,7 +3,7 @@
 //! 参见 `10-tauri-shell.html`。提供 `AppState`（全局状态）与 `AppEvent`（事件推送）。
 //!
 //! **说明**：完整的 `#[tauri::command]` 宏、`tauri::Builder` 与前端集成需要
-//! `tauri` 框架依赖与 WebView 运行时，属于产品层（Charter/Hermes）职责。本公共
+//! `tauri` 框架依赖与 WebView 运行时，属于产品层（R-Code/Hermes）职责。本公共
 //! crate 只提供与 Tauri 无关的状态/事件类型与初始化逻辑，便于在无 GUI 环境下
 //! 测试与复用。
 

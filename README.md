@@ -1,6 +1,6 @@
 # agent-core
 
-Charter（桌面 Agentic IDE）与 Tiny Hermes（自进化 AI Agent）共享的公共模块。
+R-Code（桌面 Agentic IDE）与 Tiny Hermes（自进化 AI Agent）共享的公共模块。
 以独立 Rust workspace 提供，可被两个产品以 git submodule 形式固定版本引用。
 
 ## 模块清单
@@ -29,7 +29,7 @@ cargo doc --no-deps --workspace
 ## 作为子模块接入
 
 ```bash
-# 在 Charter 或 Tiny Hermes 根目录
+# 在 R-Code 或 Tiny Hermes 根目录
 git submodule add <agent-core-repo-url> vendor/agent-core
 git submodule update --init --recursive
 

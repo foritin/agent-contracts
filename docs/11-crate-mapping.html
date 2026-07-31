@@ -11,16 +11,16 @@
   <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-core</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Core</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
   <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="crate-映射表">Crate 映射表</h1>
 <h2 id="概述">概述</h2>
-<p>本文档定义新 Rust crate 与原始 TypeScript 包之间的映射关系，<br>以及两个项目（Charter 和 Hermes）如何使用这些 crate。</p>
-<blockquote><p><strong>范围边界</strong>：<code>agent-core/crates/</code> 下的 crate（hermes-error/core/llm/mcp/store/config/compaction/ipc/tauri）是<strong>公共层</strong>，不含产品私有功能。下文 <code>charter-*</code>、<code>hermes-turn/tools/server</code> 等是<strong>产品层</strong> crate，由各产品仓库维护，不在 agent-core 范围内；此处列出仅为迁移参考。</p></blockquote>
+<p>本文档定义新 Rust crate 与原始 TypeScript 包之间的映射关系，<br>以及两个项目（R-Code 和 Hermes）如何使用这些 crate。</p>
+<blockquote><p><strong>范围边界</strong>：<code>agent-core/crates/</code> 下的 crate（hermes-error/core/llm/mcp/store/config/compaction/ipc/tauri）是<strong>公共层</strong>，不含产品私有功能。下文 <code>r-code-*</code>、<code>hermes-turn/tools/server</code> 等是<strong>产品层</strong> crate，由各产品仓库维护，不在 agent-core 范围内；此处列出仅为迁移参考。</p></blockquote>
 <hr>
-<h2 id="charter-映射">Charter 映射</h2>
-<table><thead><tr><th>原始 TS 包</th><th>新 Rust Crate</th><th>说明</th></tr></thead><tbody><tr><td><code>packages/foundation/</code></td><td><code>hermes-core</code> + <code>hermes-error</code></td><td>基础类型、错误处理</td></tr><tr><td><code>packages/agent-contract/</code></td><td><code>hermes-core</code></td><td>AgentRuntime/AgentEvent 契约</td></tr><tr><td><code>packages/ipc-contracts/</code></td><td><code>hermes-ipc</code> + <code>hermes-core</code></td><td>IPC 通道契约</td></tr><tr><td><code>packages/agent-runtime-pi/</code></td><td><code>hermes-charter/src/agent/</code></td><td>Pi SDK 适配（R-Code（Charter）特有）</td></tr><tr><td><code>packages/agent-runtime-mock/</code></td><td><code>hermes-charter/src/mock/</code></td><td>Mock 运行时（R-Code（Charter）特有）</td></tr><tr><td><code>packages/persistence/</code></td><td><code>hermes-store</code></td><td>SQLite 持久化</td></tr><tr><td><code>packages/tool-gateway/</code></td><td><code>hermes-charter/src/gateway/</code></td><td>Tool Gateway（R-Code（Charter）特有）</td></tr><tr><td><code>packages/change-service/</code></td><td><code>hermes-charter/src/change/</code></td><td>变更服务（R-Code（Charter）特有）</td></tr><tr><td><code>packages/workspace-service/</code></td><td><code>hermes-charter/src/workspace/</code></td><td>工作区服务（R-Code（Charter）特有）</td></tr><tr><td><code>packages/document-service/</code></td><td><code>hermes-charter/src/document/</code></td><td>文档服务（R-Code（Charter）特有）</td></tr><tr><td><code>packages/git-service/</code></td><td><code>hermes-charter/src/git/</code></td><td>Git 服务（R-Code（Charter）特有）</td></tr><tr><td><code>packages/search-service/</code></td><td><code>hermes-charter/src/search/</code></td><td>搜索服务（R-Code（Charter）特有）</td></tr><tr><td><code>packages/verification-service/</code></td><td><code>hermes-charter/src/verify/</code></td><td>验证服务（R-Code（Charter）特有）</td></tr><tr><td><code>packages/terminal-service/</code></td><td><code>hermes-charter/src/terminal/</code></td><td>终端服务（R-Code（Charter）特有）</td></tr><tr><td><code>packages/language-service/</code></td><td><code>hermes-charter/src/language/</code></td><td>语言服务（R-Code（Charter）特有）</td></tr><tr><td><code>packages/agent-worker/</code></td><td><code>hermes-charter/src/worker/</code></td><td>Agent Worker 进程</td></tr><tr><td><code>apps/desktop-main/</code></td><td><code>hermes-charter/src/main/</code></td><td>Main 进程</td></tr><tr><td><code>apps/desktop-preload/</code></td><td><code>hermes-charter/src/preload/</code></td><td>Preload 脚本</td></tr><tr><td><code>apps/desktop-renderer/</code></td><td><code>hermes-gui/ui/</code></td><td>渲染层（React 迁移到 WebView）</td></tr></tbody></table>
+<h2 id="r-code-映射">R-Code 映射</h2>
+<table><thead><tr><th>原始 TS 包</th><th>新 Rust Crate</th><th>说明</th></tr></thead><tbody><tr><td><code>packages/foundation/</code></td><td><code>hermes-core</code> + <code>hermes-error</code></td><td>基础类型、错误处理</td></tr><tr><td><code>packages/agent-contract/</code></td><td><code>hermes-core</code></td><td>AgentRuntime/AgentEvent 契约</td></tr><tr><td><code>packages/ipc-contracts/</code></td><td><code>hermes-ipc</code> + <code>hermes-core</code></td><td>IPC 通道契约</td></tr><tr><td><code>packages/agent-runtime-pi/</code></td><td><code>hermes-r-code/src/agent/</code></td><td>Pi SDK 适配（R-Code（R-Code）特有）</td></tr><tr><td><code>packages/agent-runtime-mock/</code></td><td><code>hermes-r-code/src/mock/</code></td><td>Mock 运行时（R-Code（R-Code）特有）</td></tr><tr><td><code>packages/persistence/</code></td><td><code>hermes-store</code></td><td>SQLite 持久化</td></tr><tr><td><code>packages/tool-gateway/</code></td><td><code>hermes-r-code/src/gateway/</code></td><td>Tool Gateway（R-Code（R-Code）特有）</td></tr><tr><td><code>packages/change-service/</code></td><td><code>hermes-r-code/src/change/</code></td><td>变更服务（R-Code（R-Code）特有）</td></tr><tr><td><code>packages/workspace-service/</code></td><td><code>hermes-r-code/src/workspace/</code></td><td>工作区服务（R-Code（R-Code）特有）</td></tr><tr><td><code>packages/document-service/</code></td><td><code>hermes-r-code/src/document/</code></td><td>文档服务（R-Code（R-Code）特有）</td></tr><tr><td><code>packages/git-service/</code></td><td><code>hermes-r-code/src/git/</code></td><td>Git 服务（R-Code（R-Code）特有）</td></tr><tr><td><code>packages/search-service/</code></td><td><code>hermes-r-code/src/search/</code></td><td>搜索服务（R-Code（R-Code）特有）</td></tr><tr><td><code>packages/verification-service/</code></td><td><code>hermes-r-code/src/verify/</code></td><td>验证服务（R-Code（R-Code）特有）</td></tr><tr><td><code>packages/terminal-service/</code></td><td><code>hermes-r-code/src/terminal/</code></td><td>终端服务（R-Code（R-Code）特有）</td></tr><tr><td><code>packages/language-service/</code></td><td><code>hermes-r-code/src/language/</code></td><td>语言服务（R-Code（R-Code）特有）</td></tr><tr><td><code>packages/agent-worker/</code></td><td><code>hermes-r-code/src/worker/</code></td><td>Agent Worker 进程</td></tr><tr><td><code>apps/desktop-main/</code></td><td><code>hermes-r-code/src/main/</code></td><td>Main 进程</td></tr><tr><td><code>apps/desktop-preload/</code></td><td><code>hermes-r-code/src/preload/</code></td><td>Preload 脚本</td></tr><tr><td><code>apps/desktop-renderer/</code></td><td><code>hermes-gui/ui/</code></td><td>渲染层（React 迁移到 WebView）</td></tr></tbody></table>
 <h2 id="hermes-映射">Hermes 映射</h2>
 <table><thead><tr><th>原始 Crate</th><th>新 Crate</th><th>说明</th></tr></thead><tbody><tr><td><code>hermes-core</code></td><td><code>hermes-core</code>（来自 public）</td><td>核心抽象（共享）</td></tr><tr><td><code>hermes-llm</code></td><td><code>hermes-llm</code>（来自 public）</td><td>LLM Provider（共享）</td></tr><tr><td><code>hermes-mcp</code></td><td><code>hermes-mcp</code>（来自 public）</td><td>MCP 客户端（共享）</td></tr><tr><td><code>hermes-store</code></td><td><code>hermes-store</code>（来自 public）</td><td>持久化存储（共享）</td></tr><tr><td><code>hermes-compaction</code></td><td><code>hermes-compaction</code>（来自 public）</td><td>上下文压缩（共享）</td></tr><tr><td><code>hermes-config</code></td><td><code>hermes-config</code>（来自 public）</td><td>配置管理（共享）</td></tr><tr><td><code>hermes-error</code></td><td><code>hermes-error</code>（来自 public）</td><td>错误处理（共享）</td></tr><tr><td><code>hermes-cli</code></td><td><code>hermes-cli</code></td><td>CLI 入口（Hermes 特有）</td></tr><tr><td><code>hermes-gui</code></td><td><code>hermes-gui</code>（来自 public + 扩展）</td><td>GUI（Hermes 简化版）</td></tr><tr><td><code>hermes-weixin</code></td><td><code>hermes-weixin</code></td><td>微信 bot</td></tr><tr><td><code>hermes-feishu</code></td><td><code>hermes-feishu</code></td><td>飞书 bot</td></tr><tr><td><code>hermes-telegram</code></td><td><code>hermes-telegram</code></td><td>Telegram bot</td></tr><tr><td><code>hermes-reflect</code></td><td><code>hermes-reflect</code></td><td>反思引擎</td></tr><tr><td><code>hermes-memory</code></td><td><code>hermes-memory</code></td><td>记忆系统</td></tr><tr><td><code>hermes-skills</code></td><td><code>hermes-skills</code></td><td>Skills 系统</td></tr><tr><td><code>hermes-turn</code></td><td><code>hermes-turn</code></td><td>轮次管理</td></tr><tr><td><code>hermes-server</code></td><td><code>hermes-server</code></td><td>HTTP server</td></tr><tr><td><code>hermes-tools</code></td><td><code>hermes-tools</code></td><td>工具集</td></tr></tbody></table>
 <hr>
 <h2 id="新-cargo-workspace-结构">新 Cargo Workspace 结构</h2>
-<h3 id="charter-workspace">Charter workspace</h3>
+<h3 id="r-code-workspace">R-Code workspace</h3>
 <div class="code-block"><span class="code-block__lang">toml</span><button class="copy-code" type="button">复制</button><pre><code class="language-toml"># r-code/Cargo.toml
 [workspace]
 resolver = &quot;2&quot;
@@ -35,20 +35,20 @@ members = [
     &quot;../agent-core/crates/hermes-error&quot;,
     &quot;../agent-core/crates/hermes-tauri&quot;,
     &quot;../agent-core/crates/hermes-ipc&quot;,
-    # R-Code（Charter）特有
-    &quot;crates/charter-core&quot;,
-    &quot;crates/charter-gateway&quot;,
-    &quot;crates/charter-change&quot;,
-    &quot;crates/charter-workspace&quot;,
-    &quot;crates/charter-document&quot;,
-    &quot;crates/charter-git&quot;,
-    &quot;crates/charter-search&quot;,
-    &quot;crates/charter-verify&quot;,
-    &quot;crates/charter-terminal&quot;,
-    &quot;crates/charter-language&quot;,
-    &quot;crates/charter-agent&quot;,
-    &quot;crates/charter-main&quot;,
-    &quot;crates/charter-preload&quot;,
+    # R-Code（R-Code）特有
+    &quot;crates/r-code-core&quot;,
+    &quot;crates/r-code-gateway&quot;,
+    &quot;crates/r-code-change&quot;,
+    &quot;crates/r-code-workspace&quot;,
+    &quot;crates/r-code-document&quot;,
+    &quot;crates/r-code-git&quot;,
+    &quot;crates/r-code-search&quot;,
+    &quot;crates/r-code-verify&quot;,
+    &quot;crates/r-code-terminal&quot;,
+    &quot;crates/r-code-language&quot;,
+    &quot;crates/r-code-agent&quot;,
+    &quot;crates/r-code-main&quot;,
+    &quot;crates/r-code-preload&quot;,
 ]</code></pre></div>
 <h3 id="hermes-workspace">Hermes workspace</h3>
 <div class="code-block"><span class="code-block__lang">toml</span><button class="copy-code" type="button">复制</button><pre><code class="language-toml"># tiny-hermes/Cargo.toml
@@ -82,7 +82,7 @@ members = [
 <div class="code-block"><span class="code-block__lang">text</span><button class="copy-code" type="button">复制</button><pre><code class="language-text">┌─────────────────────────────────────────────────────────┐
 │  应用层                                                  │
 │  ┌─────────────────┐        ┌─────────────────┐        │
-│  │  Charter Main   │        │  Hermes CLI     │        │
+│  │  R-Code Main   │        │  Hermes CLI     │        │
 │  │  + Gateway      │        │  +Reflect       │        │
 │  │  + Services     │        │  +Memory        │        │
 │  └────────┬────────┘        └────────┬────────┘        │
@@ -103,32 +103,32 @@ members = [
 └─────────────────────────────────────────────────────────┘</code></pre></div>
 <hr>
 <h2 id="文件结构示例">文件结构示例</h2>
-<h3 id="charter-项目">Charter 项目</h3>
-<div class="code-block"><span class="code-block__lang">text</span><button class="copy-code" type="button">复制</button><pre><code class="language-text">charter/
+<h3 id="r-code-项目">R-Code 项目</h3>
+<div class="code-block"><span class="code-block__lang">text</span><button class="copy-code" type="button">复制</button><pre><code class="language-text">r-code/
 ├── Cargo.toml
 ├── crates/
-│   ├── charter-core/        # 核心业务逻辑
+│   ├── r-code-core/        # 核心业务逻辑
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── task.rs      # 任务状态机
 │   │       ├── agent.rs     # Agent 契约
 │   │       └── events.rs    # 事件类型
-│   ├── charter-gateway/     # Tool Gateway
+│   ├── r-code-gateway/     # Tool Gateway
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── gateway.rs   # 网关执行
 │   │       ├── permission.rs # 权限引擎
 │   │       └── classifier.rs # 命令分类
-│   ├── charter-terminal/    # 终端服务
+│   ├── r-code-terminal/    # 终端服务
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── pty.rs       # PTY 管理
 │   │       ├── blocks.rs    # 块模型
 │   │       └── orchestration.rs # 会话编排
-│   └── ...                  # 其他 R-Code（Charter）特有 crate
+│   └── ...                  # 其他 R-Code（R-Code）特有 crate
 └── ui/                      # React 前端（WebView）
     ├── package.json
     └── src/</code></pre></div>

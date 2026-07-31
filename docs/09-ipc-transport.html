@@ -11,7 +11,7 @@
   <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-core</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Core</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
   <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="ipc-传输层">IPC 传输层</h1>
 <h2 id="1-概述">1. 概述</h2>
-<p>Unix Socket（macOS/Linux）和 Named Pipe（Windows）的 JSON-RPC 2.0 传输实现。<br>用于 Charter Main ↔ Agent Worker 的进程间通信。</p>
+<p>Unix Socket（macOS/Linux）和 Named Pipe（Windows）的 JSON-RPC 2.0 传输实现。<br>用于 R-Code Main ↔ Agent Worker 的进程间通信。</p>
 <h2 id="2-协议定义">2. 协议定义</h2>
 <div class="code-block"><span class="code-block__lang">jsonc</span><button class="copy-code" type="button">复制</button><pre><code class="language-jsonc">// 请求
 {

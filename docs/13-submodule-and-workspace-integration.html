@@ -11,19 +11,19 @@
   <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-core</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Core</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
   <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="公共模块作为子模块-集成合同">公共模块作为子模块：集成合同</h1>
 <h2 id="1-本文的定位">1. 本文的定位</h2>
-<p><code>agent-core</code> 是 Charter 与 Tiny Hermes 的<strong>共同重构规范包</strong>。它不是某一端应用的<br>实现，也不携带产品私有功能；它定义两端必须保持一致的消息、Provider、会话、工具、MCP、<br>压缩、配置、错误和进程通信合同。</p>
+<p><code>agent-core</code> 是 R-Code 与 Tiny Hermes 的<strong>共同重构规范包</strong>。它不是某一端应用的<br>实现，也不携带产品私有功能；它定义两端必须保持一致的消息、Provider、会话、工具、MCP、<br>压缩、配置、错误和进程通信合同。</p>
 <p>本目录可以独立建仓并以 Git submodule 固定到两个目标仓库。这样做的目的不是让两个产品<br>共享一个不受约束的代码目录，而是让它们共享一份可版本化、可审查、可验证的公共边界。</p>
 <blockquote><p>本交付物仅包含重构文档。实现团队应按本文档在自己的 Rust workspace 中创建 crate；<br>不能把文档中的建议性目录当成已经存在的库。</p></blockquote>
 <h2 id="2-可打包目录合同">2. 可打包目录合同</h2>
 <p>将下列三个目录放到同一个父目录后，任意一个 <code>index.html</code> 都应可离线打开：</p>
 <div class="code-block"><span class="code-block__lang">text</span><button class="copy-code" type="button">复制</button><pre><code class="language-text">rebuild-kit/
 ├── agent-core/          # 本目录：公共合同与集成顺序
-├── r-code/         # R-Code（Charter）特有产品与实现说明
+├── r-code/         # R-Code（R-Code）特有产品与实现说明
 └── tiny-hermes/     # Tiny Hermes 特有产品与实现说明</code></pre></div>
 <p>跨目录链接以这三个目录同级为前提。每个目录本身也有完整的入口、目录、代码示例、<br>验收项和来源说明；即使暂时不打开另两个目录，也不会缺少本项目的执行步骤。</p>
 <h2 id="3-推荐的-git-布局">3. 推荐的 Git 布局</h2>
 <p>公共规范仓库和两个实现仓库分别拥有版本号。实现仓库只固定公共规范的 commit，不直接跟随<br><code>main</code>，以保证一次发布所依据的合同可重现。</p>
-<div class="code-block"><span class="code-block__lang">bash</span><button class="copy-code" type="button">复制</button><pre><code class="language-bash"># 在 R-Code（Charter）或 Tiny Hermes 的重构仓库根目录执行
+<div class="code-block"><span class="code-block__lang">bash</span><button class="copy-code" type="button">复制</button><pre><code class="language-bash"># 在 R-Code（R-Code）或 Tiny Hermes 的重构仓库根目录执行
 git submodule add &lt;public-docs-or-contract-repo&gt; vendor/agent-core
 git submodule update --init --recursive
 
@@ -39,7 +39,7 @@ git commit -m &quot;docs: pin agent-core contract &lt;version&gt;&quot;</code></
 <p>这能避免让应用层依赖文档相对路径，也能让文档独立打包时不携带业务源码。</p>
 <h2 id="4-cargo-workspace-接入规则">4. Cargo workspace 接入规则</h2>
 <p>目标项目应通过 workspace dependency 名称引用公共 crate，业务 crate 不得互相穿透私有模块。<br>下面示例是目标结构，而非现有文件：</p>
-<div class="code-block"><span class="code-block__lang">toml</span><button class="copy-code" type="button">复制</button><pre><code class="language-toml"># Cargo.toml（R-Code（Charter）或 Tiny Hermes 根目录）
+<div class="code-block"><span class="code-block__lang">toml</span><button class="copy-code" type="button">复制</button><pre><code class="language-toml"># Cargo.toml（R-Code（R-Code）或 Tiny Hermes 根目录）
 [workspace]
 resolver = &quot;2&quot;
 members = [&quot;crates/*&quot;]
@@ -49,15 +49,15 @@ rebuild-core = { path = &quot;vendor/agent-core/crates/hermes-core&quot; }
 rebuild-llm = { path = &quot;vendor/agent-core/crates/hermes-llm&quot; }
 rebuild-mcp = { path = &quot;vendor/agent-core/crates/hermes-mcp&quot; }
 rebuild-store = { path = &quot;vendor/agent-core/crates/hermes-store&quot; }</code></pre></div>
-<div class="code-block"><span class="code-block__lang">toml</span><button class="copy-code" type="button">复制</button><pre><code class="language-toml"># crates/charter-agent/Cargo.toml（同样适用于 Hermes 私有 crate）
+<div class="code-block"><span class="code-block__lang">toml</span><button class="copy-code" type="button">复制</button><pre><code class="language-toml"># crates/r-code-agent/Cargo.toml（同样适用于 Hermes 私有 crate）
 [dependencies]
 rebuild-core = { workspace = true }
 rebuild-llm = { workspace = true }</code></pre></div>
 <p>必须遵守：</p>
-<ol><li>公共 crate 不依赖 <code>charter-*</code>、<code>hermes-*</code> 私有 crate，也不依赖 UI、IM 或桌面框架。</li><li>公共类型只使用稳定的语义版本合同；破坏字段语义、枚举含义、流式事件顺序或权限默认值<br>都是破坏性变更。</li><li>应用层只通过公开 trait / DTO 集成，不读取公共 crate 的内部持久化细节。</li><li>若某一端需要扩展字段，优先使用显式版本化的 <code>metadata</code> 或新增 DTO 版本；不得让另一个<br>项目被迫理解它的私有状态。</li></ol>
+<ol><li>公共 crate 不依赖 <code>r-code-*</code>、<code>hermes-*</code> 私有 crate，也不依赖 UI、IM 或桌面框架。</li><li>公共类型只使用稳定的语义版本合同；破坏字段语义、枚举含义、流式事件顺序或权限默认值<br>都是破坏性变更。</li><li>应用层只通过公开 trait / DTO 集成，不读取公共 crate 的内部持久化细节。</li><li>若某一端需要扩展字段，优先使用显式版本化的 <code>metadata</code> 或新增 DTO 版本；不得让另一个<br>项目被迫理解它的私有状态。</li></ol>
 <h2 id="5-采用顺序">5. 采用顺序</h2>
 <p>公共层应先于产品私有层落地，且每一步都有可以独立运行的验收：</p>
-<table><thead><tr><th>顺序</th><th>公共能力</th><th>最小验收</th><th>后续消费者</th></tr></thead><tbody><tr><td>P0</td><td>错误、消息与 Session 模型</td><td>serde 往返、未知字段策略、崩溃后可读取 JSONL</td><td>两端所有 crate</td></tr><tr><td>P1</td><td>Provider trait 与一个 mock provider</td><td>流式文本、工具调用、取消、usage 事件可录制</td><td>Charter Agent、Hermes turn</td></tr><tr><td>P2</td><td>ToolHost 与 MCP host</td><td>工具命名、失败默认、MCP stdio/HTTP 断开恢复</td><td>Charter Gateway、Hermes tools</td></tr><tr><td>P3</td><td>配置、秘密与 compaction</td><td>配置优先级、敏感值不打印、长对话摘要不丢关联</td><td>两端入口</td></tr><tr><td>P4</td><td>IPC / Tauri 外壳（仅需要者）</td><td>请求、事件、版本不兼容拒绝、窗口重启恢复</td><td>Charter 主进程、Hermes GUI</td></tr></tbody></table>
+<table><thead><tr><th>顺序</th><th>公共能力</th><th>最小验收</th><th>后续消费者</th></tr></thead><tbody><tr><td>P0</td><td>错误、消息与 Session 模型</td><td>serde 往返、未知字段策略、崩溃后可读取 JSONL</td><td>两端所有 crate</td></tr><tr><td>P1</td><td>Provider trait 与一个 mock provider</td><td>流式文本、工具调用、取消、usage 事件可录制</td><td>R-Code Agent、Hermes turn</td></tr><tr><td>P2</td><td>ToolHost 与 MCP host</td><td>工具命名、失败默认、MCP stdio/HTTP 断开恢复</td><td>R-Code Gateway、Hermes tools</td></tr><tr><td>P3</td><td>配置、秘密与 compaction</td><td>配置优先级、敏感值不打印、长对话摘要不丢关联</td><td>两端入口</td></tr><tr><td>P4</td><td>IPC / Tauri 外壳（仅需要者）</td><td>请求、事件、版本不兼容拒绝、窗口重启恢复</td><td>R-Code 主进程、Hermes GUI</td></tr></tbody></table>
 <p>每一个 P 阶段都应先由两个消费者各写一组契约测试，再允许下一个阶段开始。这样可以避免<br>公共层在只满足一个产品时过早冻结。</p>
 <h2 id="6-版本与兼容性政策">6. 版本与兼容性政策</h2>
 <table><thead><tr><th>变更</th><th>版本策略</th><th>必需动作</th></tr></thead><tbody><tr><td>文档措辞、示例、实现细节不改变合同</td><td>patch</td><td>链接和示例编译检查</td></tr><tr><td>新增可选字段、可选 trait 方法、可选事件</td><td>minor</td><td>两端旧消费者回归测试</td></tr><tr><td>删除/重命名字段、改变默认权限、改变事件顺序</td><td>major</td><td>写迁移说明、双端同时升级、灰度回滚方案</td></tr><tr><td>修复安全漏洞</td><td>立即 patch 或 major</td><td>说明风险、最小安全版本、升级截止时间</td></tr></tbody></table>
@@ -66,17 +66,17 @@ rebuild-llm = { workspace = true }</code></pre></div>
   &quot;publicContract&quot;: &quot;v0.4.0&quot;,
   &quot;commit&quot;: &quot;&lt;immutable-commit&gt;&quot;,
   &quot;validatedBy&quot;: {
-    &quot;charter&quot;: &quot;cargo test -p charter-contract-tests&quot;,
+    &quot;r-code&quot;: &quot;cargo test -p r-code-contract-tests&quot;,
     &quot;tinyHermes&quot;: &quot;cargo test -p hermes-contract-tests&quot;
   }
 }</code></pre></div>
 <h2 id="7-跨项目契约测试">7. 跨项目契约测试</h2>
 <p>公共合同不能只靠 API 签名验证。每次 pin 或升级至少运行下表场景：</p>
-<table><thead><tr><th>合同</th><th>Charter 侧证据</th><th>Tiny Hermes 侧证据</th></tr></thead><tbody><tr><td>ContentBlock / 工具结果配对</td><td>Agent 取消时不留下孤儿 <code>tool_use</code></td><td><code>run_turn</code> 取消后可再次请求 Provider</td></tr><tr><td>Provider stream</td><td>UI 可显示增量、usage 和错误</td><td>CLI、HTTP、IM 都消费同一事件顺序</td></tr><tr><td>ToolHost 失败默认</td><td>未知工具进入审批 / 拒绝</td><td>未知或未注入工具不能静默执行</td></tr><tr><td>Session 持久化</td><td>重启后任务事件可投影</td><td>JSONL 会话可恢复、可被反思读取</td></tr><tr><td>MCP 命名</td><td>外部工具不碰撞 Gateway 名称</td><td><code>&lt;server&gt;__&lt;tool&gt;</code> 可路由到正确 server</td></tr><tr><td>配置与秘密</td><td>诊断包不含 token</td><td><code>config.toml</code> 和 channel 凭据权限受限</td></tr></tbody></table>
+<table><thead><tr><th>合同</th><th>R-Code 侧证据</th><th>Tiny Hermes 侧证据</th></tr></thead><tbody><tr><td>ContentBlock / 工具结果配对</td><td>Agent 取消时不留下孤儿 <code>tool_use</code></td><td><code>run_turn</code> 取消后可再次请求 Provider</td></tr><tr><td>Provider stream</td><td>UI 可显示增量、usage 和错误</td><td>CLI、HTTP、IM 都消费同一事件顺序</td></tr><tr><td>ToolHost 失败默认</td><td>未知工具进入审批 / 拒绝</td><td>未知或未注入工具不能静默执行</td></tr><tr><td>Session 持久化</td><td>重启后任务事件可投影</td><td>JSONL 会话可恢复、可被反思读取</td></tr><tr><td>MCP 命名</td><td>外部工具不碰撞 Gateway 名称</td><td><code>&lt;server&gt;__&lt;tool&gt;</code> 可路由到正确 server</td></tr><tr><td>配置与秘密</td><td>诊断包不含 token</td><td><code>config.toml</code> 和 channel 凭据权限受限</td></tr></tbody></table>
 <h2 id="8-故障处理与退出条件">8. 故障处理与退出条件</h2>
 <p>发现公共合同缺陷时，不要在某一产品内临时复制修复。正确流程是：</p>
 <ol><li>记录最小复现与受影响的合同编号。</li><li>在 <code>agent-core</code> 中修正文档、版本规则和测试向量。</li><li>两端用同一向量复测；任何一端不能通过时保持旧 pin。</li><li>仅当两端均提供通过证据，才更新 submodule 引用。</li></ol>
-<p>本阶段完成的定义：两个项目可以在不读取当前 Charter 或 <code>small-rust-hermes</code> 源码的条件下，<br>仅凭本目录的 HTML 文档创建一致的公共接口、测试夹具和版本治理流程。</p></article><aside class="toc" aria-label="本页目录"></aside></main>
+<p>本阶段完成的定义：两个项目可以在不读取当前 R-Code 或 <code>small-rust-hermes</code> 源码的条件下，<br>仅凭本目录的 HTML 文档创建一致的公共接口、测试夹具和版本治理流程。</p></article><aside class="toc" aria-label="本页目录"></aside></main>
   <footer class="doc-footer">本页为可离线浏览的重构规范；代码示例是实现合同，不是已交付源码。</footer>
   <script src="assets/site.js"></script>
 </body>
