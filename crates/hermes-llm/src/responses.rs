@@ -738,19 +738,17 @@ fn parse_one_responses_event(data: &str, state: &mut StreamState) -> Vec<StreamE
                 });
             }
         }
-        "response.failed" | "error" => {
-            if !state.stopped {
-                state.stopped = true;
-                let message = value
-                    .pointer("/response/error/message")
-                    .or_else(|| value.pointer("/error/message"))
-                    .or_else(|| value.get("message"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("response failed");
-                events.push(StreamEvent::Stop {
-                    reason: StopReason::Other(message.to_string()),
-                });
-            }
+        "response.failed" | "error" if !state.stopped => {
+            state.stopped = true;
+            let message = value
+                .pointer("/response/error/message")
+                .or_else(|| value.pointer("/error/message"))
+                .or_else(|| value.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("response failed");
+            events.push(StreamEvent::Stop {
+                reason: StopReason::Other(message.to_string()),
+            });
         }
         // 未知的 response.* 事件一律忽略：OpenAI 持续新增事件类型，
         // 各家兼容实现也只做子集，报错会让流白白中断。

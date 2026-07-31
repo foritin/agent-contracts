@@ -140,6 +140,7 @@ mod tests {
                 memories_dir: dir.join("m"),
             },
             compaction: Default::default(),
+            orchestration: Default::default(),
             tauri: None,
         }
     }
