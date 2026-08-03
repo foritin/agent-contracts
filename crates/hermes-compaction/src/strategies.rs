@@ -128,6 +128,7 @@ impl CompactionStrategy for LlmSummaryCompaction {
                 system: Some("You are a conversation summarizer.".into()),
                 messages: vec![Message::user_text(summary_prompt)],
                 tools: vec![],
+                hosted_tools: vec![],
                 max_tokens: 2048,
                 temperature: Some(0.3),
                 enable_caching: false,

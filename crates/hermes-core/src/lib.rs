@@ -24,8 +24,8 @@ pub use hermes_error::{
 pub use compaction::CompactionStrategy;
 pub use message::{ContentBlock, FileSource, ImageSource, Message, Role};
 pub use provider::{
-    Capabilities, CompletionRequest, CompletionResponse, InferenceOptions, LlmProvider, StopReason,
-    StreamEvent,
+    Capabilities, CompletionRequest, CompletionResponse, HostedToolSpec, InferenceOptions,
+    LlmProvider, StopReason, StreamEvent,
 };
 pub use session::{Session, SessionEvent, SessionMeta, SessionStatus};
 pub use tool_host::{

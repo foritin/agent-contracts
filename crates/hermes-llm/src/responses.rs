@@ -806,6 +806,7 @@ mod tests {
             system: Some("be nice".into()),
             messages,
             tools: vec![],
+            hosted_tools: vec![],
             max_tokens: 1024,
             temperature: None,
             enable_caching: false,

@@ -52,6 +52,10 @@ pub struct CompletionRequest {
     pub messages: Vec<Message>,
     #[serde(default)]
     pub tools: Vec<ToolSpec>,
+    /// 由模型服务执行的托管工具。它们与客户端 `ToolSpec` 不同：Provider 会在
+    /// 服务端完成调用，Agent 不能再次通过本地 ToolHost 执行。
+    #[serde(default)]
+    pub hosted_tools: Vec<HostedToolSpec>,
     pub max_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -60,6 +64,38 @@ pub struct CompletionRequest {
     /// 会话级模型推理参数；全部为空时完全沿用 Provider 默认行为。
     #[serde(default, skip_serializing_if = "InferenceOptions::is_default")]
     pub inference: InferenceOptions,
+}
+
+/// 跨 Provider 的服务端托管工具声明。
+///
+/// 每个协议适配器负责把它映射为厂商自己的请求结构；不支持的适配器应忽略或
+/// 显式拒绝，而不能把它伪装成需要客户端执行的函数调用。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HostedToolSpec {
+    WebSearch {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_uses: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        allowed_domains: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blocked_domains: Vec<String>,
+    },
+}
+
+impl HostedToolSpec {
+    /// 默认的按需联网搜索：模型自行决定是否调用，每个请求最多搜索五次。
+    pub fn web_search() -> Self {
+        Self::WebSearch {
+            max_uses: Some(5),
+            allowed_domains: Vec::new(),
+            blocked_domains: Vec::new(),
+        }
+    }
+
+    pub fn is_web_search(&self) -> bool {
+        matches!(self, Self::WebSearch { .. })
+    }
 }
 
 impl InferenceOptions {
@@ -91,11 +127,46 @@ impl CompletionResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
-    TextDelta { text: String },
-    ToolUseStart { id: String, name: String },
-    ToolUseDelta { id: String, input_json: String },
-    ToolUseComplete { id: String, input: Value },
-    Stop { reason: StopReason },
+    TextDelta {
+        text: String,
+    },
+    ToolUseStart {
+        id: String,
+        name: String,
+    },
+    ToolUseDelta {
+        id: String,
+        input_json: String,
+    },
+    ToolUseComplete {
+        id: String,
+        input: Value,
+    },
+    /// A tool executed by the model provider itself. Consumers may display it, but must not
+    /// dispatch it to the local ToolHost.
+    HostedToolUse {
+        id: String,
+        name: String,
+        input: Value,
+        /// Provider-native block retained only for protocol continuation. Product event logs
+        /// should use the public fields above and must not expose this payload directly.
+        #[serde(skip)]
+        provider_content: Option<Value>,
+    },
+    /// Public, sanitized result metadata for a provider-hosted tool.
+    HostedToolResult {
+        id: String,
+        name: String,
+        output: Value,
+        is_error: bool,
+        /// Provider-native result retained for mixed client/server tool turns and pause/resume.
+        /// It may contain encrypted search content, so UI consumers must use `output` instead.
+        #[serde(skip)]
+        provider_content: Option<Value>,
+    },
+    Stop {
+        reason: StopReason,
+    },
     Usage(Usage),
 }
 
