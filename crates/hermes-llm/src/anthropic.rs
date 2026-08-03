@@ -4,8 +4,8 @@
 //! 与 prompt caching。错误消息绝不包含 api_key（V-PROV-02）。
 
 use hermes_core::{
-    Capabilities, CompletionRequest, CompletionResponse, ContentBlock, HostedToolSpec, LlmProvider,
-    Message, Role, StopReason, StreamEvent, Usage,
+    Capabilities, CompletionRequest, CompletionResponse, ContentBlock, HostedToolFormat,
+    HostedToolSpec, LlmProvider, Message, Role, StopReason, StreamEvent, Usage,
 };
 use hermes_error::{Error, Result};
 use serde_json::{json, Value};
@@ -83,7 +83,12 @@ impl AnthropicProvider {
                 })
             })
             .collect::<Vec<_>>();
-        tools.extend(request.hosted_tools.iter().map(hosted_tool_to_anthropic));
+        tools.extend(
+            request
+                .hosted_tools
+                .iter()
+                .filter_map(hosted_tool_to_anthropic),
+        );
         if !tools.is_empty() {
             body["tools"] = json!(tools);
         }
@@ -153,29 +158,55 @@ impl AnthropicProvider {
 
 /// Anthropic 与 DeepSeek Anthropic 兼容口都把服务端工具放在 `tools` 数组，
 /// 但它们带版本化 `type`，且不会产生需要客户端执行的普通 `tool_use`。
-fn hosted_tool_to_anthropic(tool: &HostedToolSpec) -> Value {
+fn hosted_tool_to_anthropic(tool: &HostedToolSpec) -> Option<Value> {
     match tool {
         HostedToolSpec::WebSearch {
+            format: HostedToolFormat::Standard,
             max_uses,
             allowed_domains,
             blocked_domains,
-        } => {
-            let mut value = json!({
-                "type": "web_search_20250305",
-                "name": "web_search",
-            });
-            if let Some(max_uses) = max_uses {
-                value["max_uses"] = json!(max_uses);
-            }
-            if !allowed_domains.is_empty() {
-                value["allowed_domains"] = json!(allowed_domains);
-            }
-            if !blocked_domains.is_empty() {
-                value["blocked_domains"] = json!(blocked_domains);
-            }
-            value
-        }
+        } => Some(anthropic_web_tool(
+            "web_search_20250305",
+            "web_search",
+            *max_uses,
+            allowed_domains,
+            blocked_domains,
+        )),
+        HostedToolSpec::WebFetch {
+            format: HostedToolFormat::Standard,
+            max_uses,
+            allowed_domains,
+            blocked_domains,
+        } => Some(anthropic_web_tool(
+            "web_fetch_20250910",
+            "web_fetch",
+            *max_uses,
+            allowed_domains,
+            blocked_domains,
+        )),
+        // Provider-specific formats must never be sent to an Anthropic-compatible endpoint.
+        _ => None,
     }
+}
+
+fn anthropic_web_tool(
+    tool_type: &str,
+    name: &str,
+    max_uses: Option<u32>,
+    allowed_domains: &[String],
+    blocked_domains: &[String],
+) -> Value {
+    let mut value = json!({"type": tool_type, "name": name});
+    if let Some(max_uses) = max_uses {
+        value["max_uses"] = json!(max_uses);
+    }
+    if !allowed_domains.is_empty() {
+        value["allowed_domains"] = json!(allowed_domains);
+    }
+    if !blocked_domains.is_empty() {
+        value["blocked_domains"] = json!(blocked_domains);
+    }
+    value
 }
 
 #[async_trait::async_trait]
@@ -723,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn hosted_web_search_uses_the_anthropic_server_tool_schema() {
+    fn hosted_web_tools_use_the_anthropic_server_tool_schemas() {
         let provider = AnthropicProvider::new(
             "sk-test".into(),
             "deepseek-v4-pro".into(),
@@ -735,7 +766,7 @@ mod tests {
             system: None,
             messages: vec![Message::user_text("search Rust news")],
             tools: vec![],
-            hosted_tools: vec![HostedToolSpec::web_search()],
+            hosted_tools: vec![HostedToolSpec::web_search(), HostedToolSpec::web_fetch()],
             max_tokens: 1024,
             temperature: None,
             enable_caching: false,
@@ -747,6 +778,9 @@ mod tests {
         assert_eq!(body["tools"][0]["name"], "web_search");
         assert_eq!(body["tools"][0]["max_uses"], 5);
         assert!(body["tools"][0].get("input_schema").is_none());
+        assert_eq!(body["tools"][1]["type"], "web_fetch_20250910");
+        assert_eq!(body["tools"][1]["name"], "web_fetch");
+        assert_eq!(body["tools"][1]["max_uses"], 5);
     }
 
     #[test]
