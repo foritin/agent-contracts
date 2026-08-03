@@ -70,10 +70,34 @@ pub struct CompletionRequest {
 ///
 /// 每个协议适配器负责把它映射为厂商自己的请求结构；不支持的适配器应忽略或
 /// 显式拒绝，而不能把它伪装成需要客户端执行的函数调用。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostedToolFormat {
+    /// 协议原生格式：Anthropic 的版本化工具，或 Responses 的 `web_search`。
+    #[default]
+    Standard,
+    /// 阿里百炼 Responses：网页读取使用 `web_extractor`。
+    DashScope,
+    /// OpenRouter Server Tools：使用 `openrouter:*` 类型。
+    OpenRouter,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostedToolSpec {
     WebSearch {
+        #[serde(default, skip_serializing_if = "is_standard_hosted_tool_format")]
+        format: HostedToolFormat,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_uses: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        allowed_domains: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blocked_domains: Vec<String>,
+    },
+    WebFetch {
+        #[serde(default, skip_serializing_if = "is_standard_hosted_tool_format")]
+        format: HostedToolFormat,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_uses: Option<u32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -83,10 +107,33 @@ pub enum HostedToolSpec {
     },
 }
 
+fn is_standard_hosted_tool_format(format: &HostedToolFormat) -> bool {
+    *format == HostedToolFormat::Standard
+}
+
 impl HostedToolSpec {
     /// 默认的按需联网搜索：模型自行决定是否调用，每个请求最多搜索五次。
     pub fn web_search() -> Self {
+        Self::web_search_with_format(HostedToolFormat::Standard)
+    }
+
+    pub fn web_search_with_format(format: HostedToolFormat) -> Self {
         Self::WebSearch {
+            format,
+            max_uses: Some(5),
+            allowed_domains: Vec::new(),
+            blocked_domains: Vec::new(),
+        }
+    }
+
+    /// 默认的按需网页读取：模型自行决定是否访问 URL，每个请求最多读取五次。
+    pub fn web_fetch() -> Self {
+        Self::web_fetch_with_format(HostedToolFormat::Standard)
+    }
+
+    pub fn web_fetch_with_format(format: HostedToolFormat) -> Self {
+        Self::WebFetch {
+            format,
             max_uses: Some(5),
             allowed_domains: Vec::new(),
             blocked_domains: Vec::new(),
@@ -95,6 +142,10 @@ impl HostedToolSpec {
 
     pub fn is_web_search(&self) -> bool {
         matches!(self, Self::WebSearch { .. })
+    }
+
+    pub fn is_web_fetch(&self) -> bool {
+        matches!(self, Self::WebFetch { .. })
     }
 }
 

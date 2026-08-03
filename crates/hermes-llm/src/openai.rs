@@ -4,8 +4,8 @@
 //! caching。错误信息不含 api_key。
 
 use hermes_core::{
-    Capabilities, CompletionRequest, CompletionResponse, ContentBlock, LlmProvider, Message, Role,
-    StopReason, StreamEvent, ToolSpec, Usage,
+    Capabilities, CompletionRequest, CompletionResponse, ContentBlock, HostedToolFormat,
+    HostedToolSpec, LlmProvider, Message, Role, StopReason, StreamEvent, ToolSpec, Usage,
 };
 use hermes_error::{Error, Result};
 use serde_json::{json, Value};
@@ -93,11 +93,77 @@ impl OpenAiProvider {
                 body["stream_options"] = json!({ "include_usage": true });
             }
         }
-        if !request.tools.is_empty() {
-            body["tools"] = json!(request.tools.iter().map(tool_to_openai).collect::<Vec<_>>());
+        let mut tools = request.tools.iter().map(tool_to_openai).collect::<Vec<_>>();
+        tools.extend(
+            request
+                .hosted_tools
+                .iter()
+                .filter_map(hosted_tool_to_openai),
+        );
+        if !tools.is_empty() {
+            body["tools"] = json!(tools);
         }
         body
     }
+}
+
+/// Chat Completions has no standard hosted-web schema. OpenRouter defines explicit server-tool
+/// types on this endpoint; every other format stays out instead of masquerading as a function.
+fn hosted_tool_to_openai(tool: &HostedToolSpec) -> Option<Value> {
+    match tool {
+        HostedToolSpec::WebSearch {
+            format: HostedToolFormat::OpenRouter,
+            max_uses,
+            allowed_domains,
+            blocked_domains,
+        } => Some(openrouter_server_tool(
+            "openrouter:web_search",
+            *max_uses,
+            allowed_domains,
+            blocked_domains,
+        )),
+        HostedToolSpec::WebFetch {
+            format: HostedToolFormat::OpenRouter,
+            max_uses,
+            allowed_domains,
+            blocked_domains,
+        } => Some(openrouter_server_tool(
+            "openrouter:web_fetch",
+            *max_uses,
+            allowed_domains,
+            blocked_domains,
+        )),
+        _ => None,
+    }
+}
+
+fn openrouter_server_tool(
+    tool_type: &str,
+    max_uses: Option<u32>,
+    allowed_domains: &[String],
+    blocked_domains: &[String],
+) -> Value {
+    let mut parameters = serde_json::Map::new();
+    if let Some(max_uses) = max_uses {
+        parameters.insert("max_uses".into(), json!(max_uses));
+    }
+    if !allowed_domains.is_empty() {
+        parameters.insert("allowed_domains".into(), json!(allowed_domains));
+    }
+    if !blocked_domains.is_empty() {
+        let key = if tool_type == "openrouter:web_search" {
+            "excluded_domains"
+        } else {
+            "blocked_domains"
+        };
+        parameters.insert(key.into(), json!(blocked_domains));
+    }
+
+    let mut tool = json!({"type": tool_type});
+    if !parameters.is_empty() {
+        tool["parameters"] = Value::Object(parameters);
+    }
+    tool
 }
 
 #[async_trait::async_trait]
@@ -808,6 +874,35 @@ mod tests {
         assert_eq!(msgs[0]["content"], "be nice");
         assert_eq!(msgs[1]["role"], "user");
         assert_eq!(body["max_tokens"], 16);
+    }
+
+    #[test]
+    fn openrouter_hosted_web_tools_are_sent_as_server_tools() {
+        let provider = OpenAiProvider::new(
+            "key".into(),
+            "anthropic/claude-sonnet-5".into(),
+            "https://openrouter.ai/api/v1".into(),
+        );
+        let request = CompletionRequest {
+            model: "anthropic/claude-sonnet-5".into(),
+            system: None,
+            messages: vec![Message::user_text("research this")],
+            tools: vec![],
+            hosted_tools: vec![
+                HostedToolSpec::web_search_with_format(HostedToolFormat::OpenRouter),
+                HostedToolSpec::web_fetch_with_format(HostedToolFormat::OpenRouter),
+            ],
+            max_tokens: 128,
+            temperature: None,
+            enable_caching: false,
+            inference: Default::default(),
+        };
+
+        let body = provider.build_body(&request, false);
+        assert_eq!(body["tools"][0]["type"], "openrouter:web_search");
+        assert_eq!(body["tools"][0]["parameters"]["max_uses"], 5);
+        assert_eq!(body["tools"][1]["type"], "openrouter:web_fetch");
+        assert_eq!(body["tools"][1]["parameters"]["max_uses"], 5);
     }
 
     #[test]

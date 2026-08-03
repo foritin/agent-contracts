@@ -21,8 +21,8 @@
 //! - `No tool call found for function call output with call_id …`
 
 use hermes_core::{
-    Capabilities, CompletionRequest, CompletionResponse, ContentBlock, LlmProvider, Message, Role,
-    StopReason, StreamEvent, ToolSpec, Usage,
+    Capabilities, CompletionRequest, CompletionResponse, ContentBlock, HostedToolFormat,
+    HostedToolSpec, LlmProvider, Message, Role, StopReason, StreamEvent, ToolSpec, Usage,
 };
 use hermes_error::{Error, Result};
 use serde_json::{json, Value};
@@ -115,12 +115,19 @@ impl ResponsesProvider {
         if stream {
             body["stream"] = json!(true);
         }
-        if !request.tools.is_empty() {
-            body["tools"] = json!(request
-                .tools
+        let mut tools = request
+            .tools
+            .iter()
+            .map(tool_to_responses)
+            .collect::<Vec<_>>();
+        tools.extend(
+            request
+                .hosted_tools
                 .iter()
-                .map(tool_to_responses)
-                .collect::<Vec<_>>());
+                .filter_map(hosted_tool_to_responses),
+        );
+        if !tools.is_empty() {
+            body["tools"] = json!(tools);
             body["tool_choice"] = json!("auto");
         }
         if self.reasoning == ReasoningMode::EncryptedReplay {
@@ -339,6 +346,17 @@ pub fn message_to_items(msg: &Message, reasoning: ReasoningMode) -> Vec<Value> {
                             "arguments": input.to_string(),
                         }));
                     }
+                    ContentBlock::Custom { type_name, data }
+                        if is_hosted_web_item_type(type_name) =>
+                    {
+                        // Responses hosted tools are output items, not function calls. DeepSeek's
+                        // stateless endpoint asks clients to replay the completed item as-is so it
+                        // can restore the provider-side search context on later turns.
+                        flush_assistant_text(&mut text_buffer, &mut items);
+                        let mut item = data.as_object().cloned().unwrap_or_default();
+                        item.insert("type".to_string(), Value::String(type_name.clone()));
+                        items.push(Value::Object(item));
+                    }
                     _ => {}
                 }
             }
@@ -411,10 +429,24 @@ fn item_type(item: &Value) -> &str {
     item.get("type").and_then(|v| v.as_str()).unwrap_or("")
 }
 
+fn is_hosted_web_item_type(kind: &str) -> bool {
+    matches!(
+        kind,
+        "web_search_call" | "web_fetch_call" | "web_extractor_call"
+    )
+}
+
+fn hosted_web_tool_name(kind: &str) -> &'static str {
+    match kind {
+        "web_fetch_call" | "web_extractor_call" => "web_fetch",
+        _ => "web_search",
+    }
+}
+
 /// reasoning 的合法后继：函数调用，或助手消息。
 fn is_reasoning_product(item: &Value) -> bool {
     match item_type(item) {
-        "function_call" => true,
+        kind if kind == "function_call" || is_hosted_web_item_type(kind) => true,
         "message" => item.get("role").and_then(|v| v.as_str()) == Some("assistant"),
         _ => false,
     }
@@ -431,6 +463,78 @@ fn tool_to_responses(tool: &ToolSpec) -> Value {
         // 显式关掉，避免服务端按严格模式校验后拒绝。
         "strict": false,
     })
+}
+
+fn hosted_tool_to_responses(tool: &HostedToolSpec) -> Option<Value> {
+    match tool {
+        // OpenAI, xAI, Azure, DeepSeek and Ark use the standard Responses schema. DashScope uses
+        // the same search type but a dedicated extractor type for full-page reads.
+        HostedToolSpec::WebSearch {
+            format: HostedToolFormat::Standard | HostedToolFormat::DashScope,
+            ..
+        } => Some(json!({"type": "web_search"})),
+        HostedToolSpec::WebFetch {
+            format: HostedToolFormat::DashScope,
+            ..
+        } => Some(json!({"type": "web_extractor"})),
+        HostedToolSpec::WebSearch {
+            format: HostedToolFormat::OpenRouter,
+            max_uses,
+            allowed_domains,
+            blocked_domains,
+        } => Some(openrouter_server_tool(
+            "openrouter:web_search",
+            *max_uses,
+            allowed_domains,
+            blocked_domains,
+        )),
+        HostedToolSpec::WebFetch {
+            format: HostedToolFormat::OpenRouter,
+            max_uses,
+            allowed_domains,
+            blocked_domains,
+        } => Some(openrouter_server_tool(
+            "openrouter:web_fetch",
+            *max_uses,
+            allowed_domains,
+            blocked_domains,
+        )),
+        // Standard Responses does not define a standalone web-fetch type. OpenAI/xAI/Azure
+        // expose page opening through `web_search`; Anthropic maps WebFetch in its own adapter.
+        HostedToolSpec::WebFetch {
+            format: HostedToolFormat::Standard,
+            ..
+        } => None,
+    }
+}
+
+fn openrouter_server_tool(
+    tool_type: &str,
+    max_uses: Option<u32>,
+    allowed_domains: &[String],
+    blocked_domains: &[String],
+) -> Value {
+    let mut parameters = serde_json::Map::new();
+    if let Some(max_uses) = max_uses {
+        parameters.insert("max_uses".into(), json!(max_uses));
+    }
+    if !allowed_domains.is_empty() {
+        parameters.insert("allowed_domains".into(), json!(allowed_domains));
+    }
+    if !blocked_domains.is_empty() {
+        let key = if tool_type == "openrouter:web_search" {
+            "excluded_domains"
+        } else {
+            "blocked_domains"
+        };
+        parameters.insert(key.into(), json!(blocked_domains));
+    }
+
+    let mut tool = json!({"type": tool_type});
+    if !parameters.is_empty() {
+        tool["parameters"] = Value::Object(parameters);
+    }
+    tool
 }
 
 // ── 响应解析 ──────────────────────────────────────────────────
@@ -480,6 +584,11 @@ pub fn parse_responses_response(
                     name,
                     input: parse_arguments(item.get("arguments").and_then(|v| v.as_str())),
                 });
+            }
+            kind if is_hosted_web_item_type(kind) => {
+                if let Some(block) = responses_hosted_item_to_custom(item) {
+                    content.push(block);
+                }
             }
             "message" => {
                 let text = output_text_of(item);
@@ -583,6 +692,9 @@ struct StreamState {
     calls: std::collections::HashMap<String, (String, String)>,
     /// 已发出 ToolUseComplete 的 call_id，防止 `.done` 与 `response.completed` 重复发。
     completed_calls: std::collections::HashSet<String>,
+    /// 已发出 HostedToolUse / HostedToolResult 的 Responses web-search item id。
+    announced_hosted_searches: std::collections::HashSet<String>,
+    completed_hosted_searches: std::collections::HashSet<String>,
     /// 上一个 `sequence_number`，用于断线重连后的去重。
     last_sequence: Option<u64>,
     saw_tool_call: bool,
@@ -667,25 +779,31 @@ fn parse_one_responses_event(data: &str, state: &mut StreamState) -> Vec<StreamE
         }
         "response.output_item.added" => {
             if let Some(item) = value.get("item") {
-                if item_type(item) == "function_call" {
-                    state.saw_tool_call = true;
-                    let item_id = item
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    let call_id = item
-                        .get("call_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    let name = item
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    state.calls.insert(item_id, (call_id.clone(), name.clone()));
-                    events.push(StreamEvent::ToolUseStart { id: call_id, name });
+                match item_type(item) {
+                    "function_call" => {
+                        state.saw_tool_call = true;
+                        let item_id = item
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let call_id = item
+                            .get("call_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let name = item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        state.calls.insert(item_id, (call_id.clone(), name.clone()));
+                        events.push(StreamEvent::ToolUseStart { id: call_id, name });
+                    }
+                    kind if is_hosted_web_item_type(kind) => {
+                        announce_hosted_web_item(item, state, &mut events)
+                    }
+                    _ => {}
                 }
             }
         }
@@ -705,18 +823,26 @@ fn parse_one_responses_event(data: &str, state: &mut StreamState) -> Vec<StreamE
         // `.done` 携带完整字符串，作为唯一可信来源；delta 只用于 UI 增量显示
         "response.output_item.done" => {
             if let Some(item) = value.get("item") {
-                if item_type(item) == "function_call" {
-                    let call_id = item
-                        .get("call_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    if !call_id.is_empty() && state.completed_calls.insert(call_id.clone()) {
-                        events.push(StreamEvent::ToolUseComplete {
-                            id: call_id,
-                            input: parse_arguments(item.get("arguments").and_then(|v| v.as_str())),
-                        });
+                match item_type(item) {
+                    "function_call" => {
+                        let call_id = item
+                            .get("call_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        if !call_id.is_empty() && state.completed_calls.insert(call_id.clone()) {
+                            events.push(StreamEvent::ToolUseComplete {
+                                id: call_id,
+                                input: parse_arguments(
+                                    item.get("arguments").and_then(|v| v.as_str()),
+                                ),
+                            });
+                        }
                     }
+                    kind if is_hosted_web_item_type(kind) => {
+                        complete_hosted_web_item(item, state, &mut events)
+                    }
+                    _ => {}
                 }
             }
         }
@@ -765,31 +891,118 @@ fn drain_final_output(response: &Value, state: &mut StreamState) -> Vec<StreamEv
     };
     let mut events = Vec::new();
     for item in output {
-        if item_type(item) != "function_call" {
-            continue;
+        match item_type(item) {
+            "function_call" => {
+                let Some(call_id) = item.get("call_id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if call_id.is_empty() || !state.completed_calls.insert(call_id.to_string()) {
+                    continue;
+                }
+                state.saw_tool_call = true;
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                events.push(StreamEvent::ToolUseStart {
+                    id: call_id.to_string(),
+                    name,
+                });
+                events.push(StreamEvent::ToolUseComplete {
+                    id: call_id.to_string(),
+                    input: parse_arguments(item.get("arguments").and_then(|v| v.as_str())),
+                });
+            }
+            kind if is_hosted_web_item_type(kind) => {
+                complete_hosted_web_item(item, state, &mut events)
+            }
+            _ => {}
         }
-        let Some(call_id) = item.get("call_id").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if call_id.is_empty() || !state.completed_calls.insert(call_id.to_string()) {
-            continue;
-        }
-        state.saw_tool_call = true;
-        let name = item
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        events.push(StreamEvent::ToolUseStart {
-            id: call_id.to_string(),
-            name,
-        });
-        events.push(StreamEvent::ToolUseComplete {
-            id: call_id.to_string(),
-            input: parse_arguments(item.get("arguments").and_then(|v| v.as_str())),
-        });
     }
     events
+}
+
+fn responses_hosted_item_to_custom(item: &Value) -> Option<ContentBlock> {
+    let mut data = item.as_object()?.clone();
+    let type_name = data.remove("type")?.as_str()?.to_string();
+    is_hosted_web_item_type(&type_name).then_some(ContentBlock::Custom {
+        type_name,
+        data: Value::Object(data),
+    })
+}
+
+fn hosted_web_item_id(item: &Value) -> Option<String> {
+    item.get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn hosted_web_item_input(item: &Value) -> Value {
+    if item_type(item) == "web_extractor_call" {
+        return json!({
+            "goal": item.get("goal").cloned().unwrap_or(Value::Null),
+            "urls": item.get("urls").cloned().unwrap_or_else(|| json!([])),
+        });
+    }
+    let action = item.get("action").unwrap_or(&Value::Null);
+    if let Some(query) = action.get("query").and_then(Value::as_str) {
+        return json!({"query": query});
+    }
+    if let Some(url) = action.get("url").and_then(Value::as_str) {
+        return json!({
+            "action": action.get("type").and_then(Value::as_str).unwrap_or("open_page"),
+            "url": url,
+        });
+    }
+    json!({
+        "action": action.get("type").and_then(Value::as_str).unwrap_or("search")
+    })
+}
+
+fn announce_hosted_web_item(item: &Value, state: &mut StreamState, events: &mut Vec<StreamEvent>) {
+    let Some(id) = hosted_web_item_id(item) else {
+        return;
+    };
+    if state.announced_hosted_searches.insert(id.clone()) {
+        events.push(StreamEvent::HostedToolUse {
+            id,
+            name: hosted_web_tool_name(item_type(item)).to_string(),
+            input: hosted_web_item_input(item),
+            // The completed output item is retained once in HostedToolResult below.
+            provider_content: None,
+        });
+    }
+}
+
+fn complete_hosted_web_item(item: &Value, state: &mut StreamState, events: &mut Vec<StreamEvent>) {
+    let Some(id) = hosted_web_item_id(item) else {
+        return;
+    };
+    announce_hosted_web_item(item, state, events);
+    if !state.completed_hosted_searches.insert(id.clone()) {
+        return;
+    }
+    let status = item
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("completed");
+    let is_error = matches!(status, "failed" | "incomplete");
+    events.push(StreamEvent::HostedToolResult {
+        id,
+        name: hosted_web_tool_name(item_type(item)).to_string(),
+        output: if item_type(item) == "web_extractor_call" {
+            json!({
+                "status": status,
+                "urls": item.get("urls").cloned().unwrap_or_else(|| json!([])),
+            })
+        } else {
+            json!({"status": status})
+        },
+        is_error,
+        provider_content: Some(item.clone()),
+    });
 }
 
 #[cfg(test)]
@@ -873,6 +1086,54 @@ mod tests {
     }
 
     #[test]
+    fn hosted_web_search_uses_the_responses_server_tool_schema() {
+        let mut req = request(vec![]);
+        req.hosted_tools = vec![hermes_core::HostedToolSpec::web_search()];
+
+        let body = provider("https://api.deepseek.com").build_body(&req, false);
+
+        assert_eq!(body["tools"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["tools"][0]["type"], "web_search");
+        assert!(body["tools"][0].get("name").is_none());
+        assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn provider_specific_responses_web_tools_use_their_documented_types() {
+        let mut dashscope = request(vec![]);
+        dashscope.hosted_tools = vec![
+            HostedToolSpec::web_search_with_format(HostedToolFormat::DashScope),
+            HostedToolSpec::web_fetch_with_format(HostedToolFormat::DashScope),
+        ];
+        let dashscope_body = provider("https://dashscope.aliyuncs.com/compatible-mode/v1")
+            .build_body(&dashscope, false);
+        assert_eq!(dashscope_body["tools"][0]["type"], "web_search");
+        assert_eq!(dashscope_body["tools"][1]["type"], "web_extractor");
+
+        let mut openrouter = request(vec![]);
+        openrouter.hosted_tools = vec![
+            HostedToolSpec::web_search_with_format(HostedToolFormat::OpenRouter),
+            HostedToolSpec::web_fetch_with_format(HostedToolFormat::OpenRouter),
+        ];
+        let openrouter_body =
+            provider("https://openrouter.ai/api/v1").build_body(&openrouter, false);
+        assert_eq!(openrouter_body["tools"][0]["type"], "openrouter:web_search");
+        assert_eq!(openrouter_body["tools"][0]["parameters"]["max_uses"], 5);
+        assert_eq!(openrouter_body["tools"][1]["type"], "openrouter:web_fetch");
+        assert_eq!(openrouter_body["tools"][1]["parameters"]["max_uses"], 5);
+    }
+
+    #[test]
+    fn standard_responses_does_not_invent_a_web_fetch_type() {
+        let mut req = request(vec![]);
+        req.hosted_tools = vec![HostedToolSpec::web_fetch()];
+
+        let body = provider("https://api.openai.com/v1").build_body(&req, false);
+
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
     fn include_only_requested_in_encrypted_replay_mode() {
         let plain = provider("https://api.openai.com").build_body(&request(vec![]), false);
         assert!(plain.get("include").is_none());
@@ -899,6 +1160,28 @@ mod tests {
         assert_eq!(items[0]["call_id"], "call_abc");
         // arguments 必须是字符串化 JSON
         assert!(items[0]["arguments"].is_string());
+    }
+
+    #[test]
+    fn assistant_web_search_call_replays_as_a_responses_input_item() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Custom {
+                type_name: "web_search_call".into(),
+                data: json!({
+                    "id": "ws_1",
+                    "status": "completed",
+                    "action": {"type": "search", "query": "Milvus hybrid search"}
+                }),
+            }],
+        };
+
+        let items = message_to_items(&msg, ReasoningMode::Drop);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "web_search_call");
+        assert_eq!(items[0]["id"], "ws_1");
+        assert_eq!(items[0]["action"]["query"], "Milvus hybrid search");
     }
 
     #[test]
@@ -1129,6 +1412,89 @@ mod tests {
             }
             other => panic!("expected ToolUseComplete, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn web_search_stream_emits_hosted_events_and_never_a_local_tool_call() {
+        let events = run_stream(&[
+            r#"{"type":"response.output_item.added","sequence_number":1,
+                "item":{"type":"web_search_call","id":"ws_1","status":"in_progress",
+                        "action":{"type":"search","query":"Milvus hybrid search"}}}"#,
+            r#"{"type":"response.output_item.done","sequence_number":2,
+                "item":{"type":"web_search_call","id":"ws_1","status":"completed",
+                        "action":{"type":"search","query":"Milvus hybrid search"}}}"#,
+            r#"{"type":"response.completed","sequence_number":3,
+                "response":{"status":"completed",
+                 "output":[{"type":"web_search_call","id":"ws_1","status":"completed",
+                            "action":{"type":"search","query":"Milvus hybrid search"}}],
+                 "usage":{"input_tokens":2,"output_tokens":1}}}"#,
+        ]);
+
+        assert!(matches!(
+            &events[0],
+            StreamEvent::HostedToolUse { id, name, input, .. }
+                if id == "ws_1"
+                    && name == "web_search"
+                    && input["query"] == "Milvus hybrid search"
+        ));
+        assert!(matches!(
+            &events[1],
+            StreamEvent::HostedToolResult { id, name, output, is_error: false, .. }
+                if id == "ws_1"
+                    && name == "web_search"
+                    && output["status"] == "completed"
+        ));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ToolUseStart { .. }
+                | StreamEvent::ToolUseDelta { .. }
+                | StreamEvent::ToolUseComplete { .. }
+        )));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, StreamEvent::HostedToolUse { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, StreamEvent::HostedToolResult { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            events.last(),
+            Some(StreamEvent::Stop {
+                reason: StopReason::EndTurn
+            })
+        ));
+    }
+
+    #[test]
+    fn web_extractor_stream_is_reported_as_hosted_web_fetch() {
+        let events = run_stream(&[
+            r#"{"type":"response.output_item.added","sequence_number":1,
+                "item":{"type":"web_extractor_call","id":"we_1","status":"in_progress",
+                        "goal":"summarize","urls":["https://example.com"]}}"#,
+            r#"{"type":"response.output_item.done","sequence_number":2,
+                "item":{"type":"web_extractor_call","id":"we_1","status":"completed",
+                        "goal":"summarize","urls":["https://example.com"],"output":"summary"}}"#,
+        ]);
+
+        assert!(matches!(
+            &events[0],
+            StreamEvent::HostedToolUse { id, name, input, .. }
+                if id == "we_1" && name == "web_fetch"
+                    && input["urls"][0] == "https://example.com"
+        ));
+        assert!(matches!(
+            &events[1],
+            StreamEvent::HostedToolResult { id, name, output, is_error: false, .. }
+                if id == "we_1" && name == "web_fetch"
+                    && output["urls"][0] == "https://example.com"
+        ));
     }
 
     #[test]
