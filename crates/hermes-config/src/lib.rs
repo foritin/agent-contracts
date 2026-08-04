@@ -136,7 +136,7 @@ impl Default for OrchestrationConfig {
             default_agent_engine: MainAgentEngine::RCode,
             delegation_router: DelegationRouterMode::Balanced,
             allow_cross_engine_delegation: true,
-            quality_loop: QualityLoopMode::Auto,
+            quality_loop: QualityLoopMode::Off,
             quality_reviewer: QualityReviewer::Auto,
             max_review_rounds: default_review_rounds(),
         }
@@ -168,9 +168,9 @@ pub enum DelegationRouterMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum QualityLoopMode {
+    #[default]
     Off,
     /// 仅工具型/工作区任务完成后复核。
-    #[default]
     Auto,
     /// 每一轮主回复都复核。
     Always,
@@ -549,5 +549,6 @@ memories_dir = "/tmp/h/m"
         assert_eq!(config.log_level, "info");
         assert_eq!(config.compaction.max_context_tokens, 180_000);
         assert!((config.compaction.trigger_threshold - 0.8).abs() < 1e-9);
+        assert_eq!(config.orchestration.quality_loop, QualityLoopMode::Off);
     }
 }
