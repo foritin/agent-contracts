@@ -97,6 +97,7 @@ impl SessionStore {
         operation_id: &str,
         message: &Message,
         mode: &str,
+        queue_id: Option<&str>,
     ) -> Result<()> {
         self.append_once(
             session_id,
@@ -107,6 +108,7 @@ impl SessionStore {
                     "operation_id": operation_id,
                     "message": message,
                     "mode": mode,
+                    "queue_id": queue_id,
                 }),
             },
         )
@@ -691,11 +693,11 @@ mod tests {
         let message = Message::user_text("guide the active run");
 
         store
-            .append_durable_user_message(id, "operation-1", &message, "steer")
+            .append_durable_user_message(id, "operation-1", &message, "steer", None)
             .await
             .unwrap();
         store
-            .append_durable_user_message(id, "operation-1", &message, "steer")
+            .append_durable_user_message(id, "operation-1", &message, "steer", None)
             .await
             .unwrap();
         let loaded = store.load(id).await.unwrap();
@@ -734,6 +736,7 @@ mod tests {
                 "operation-after-crash",
                 &Message::user_text("recovered"),
                 "steer",
+                None,
             )
             .await
             .unwrap();
