@@ -137,7 +137,7 @@ impl Default for OrchestrationConfig {
             delegation_router: DelegationRouterMode::Balanced,
             allow_cross_engine_delegation: true,
             quality_loop: QualityLoopMode::Off,
-            quality_reviewer: QualityReviewer::Auto,
+            quality_reviewer: QualityReviewer::RCode,
             max_review_rounds: default_review_rounds(),
         }
     }
@@ -180,8 +180,8 @@ pub enum QualityLoopMode {
 #[serde(rename_all = "snake_case")]
 pub enum QualityReviewer {
     /// 与主执行器交叉复核；不可用时回退 R-Code。
-    #[default]
     Auto,
+    #[default]
     RCode,
     Codex,
 }
@@ -408,6 +408,20 @@ memories_dir = "/tmp/h/m"
             config.providers.get("anthropic").unwrap().model,
             "claude-sonnet-4"
         );
+    }
+
+    #[test]
+    fn quality_reviewer_defaults_to_r_code_without_overwriting_an_explicit_choice() {
+        assert_eq!(
+            OrchestrationConfig::default().quality_reviewer,
+            QualityReviewer::RCode
+        );
+
+        let legacy: OrchestrationConfig = toml::from_str(r#"quality_loop = "auto""#).unwrap();
+        assert_eq!(legacy.quality_reviewer, QualityReviewer::RCode);
+
+        let explicit: OrchestrationConfig = toml::from_str(r#"quality_reviewer = "auto""#).unwrap();
+        assert_eq!(explicit.quality_reviewer, QualityReviewer::Auto);
     }
 
     #[test]
