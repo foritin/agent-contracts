@@ -6,4 +6,6 @@
 
 pub mod session_store;
 
-pub use session_store::SessionStore;
+pub use session_store::{
+    SessionStore, DURABLE_USER_MESSAGE_CANCEL_EVENT, DURABLE_USER_MESSAGE_EVENT,
+};

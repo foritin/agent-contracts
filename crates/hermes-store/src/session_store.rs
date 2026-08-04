@@ -6,8 +6,33 @@
 
 use hermes_core::{Message, Session, SessionEvent, SessionMeta, SessionStatus, Usage};
 use hermes_error::{Error, Result};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock, Weak},
+};
 use tokio::io::AsyncWriteExt;
+
+type SessionAppendLock = tokio::sync::Mutex<()>;
+
+/// A user message durably staged before an active runtime is asked to accept a steer.
+/// The record itself is the outbox: loaders materialize it as a normal message unless a matching
+/// cancellation record was appended after the runtime explicitly rejected the steer.
+pub const DURABLE_USER_MESSAGE_EVENT: &str = "r_code_durable_user_message";
+pub const DURABLE_USER_MESSAGE_CANCEL_EVENT: &str = "r_code_durable_user_message_cancelled";
+
+fn append_lock_for(path: &Path) -> Arc<SessionAppendLock> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<SessionAppendLock>>>> = OnceLock::new();
+    let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().expect("session append lock registry poisoned");
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(SessionAppendLock::new(()));
+    locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
+    lock
+}
 
 /// JSONL 会话存储。
 pub struct SessionStore {
@@ -37,15 +62,123 @@ impl SessionStore {
 
     /// 追加事件到会话日志。
     pub async fn append(&self, session_id: &str, event: SessionEvent) -> Result<()> {
+        self.append_batch(session_id, &[event]).await
+    }
+
+    /// Atomically append complete JSONL records under a process-wide per-session lock.
+    ///
+    /// A single `SessionStore` is not the only writer: the desktop command path and runtime event
+    /// drain deliberately construct independent handles for the same directory. Serializing by
+    /// resolved file path prevents their records from interleaving, and writing each batch with
+    /// one `write_all` prevents a body/newline split from producing invalid JSONL.
+    pub async fn append_batch(&self, session_id: &str, events: &[SessionEvent]) -> Result<()> {
         let path = self.session_path(session_id);
-        let line = serde_json::to_string(&event)?;
+        let mut encoded = Vec::new();
+        for event in events {
+            serde_json::to_writer(&mut encoded, event)?;
+            encoded.push(b'\n');
+        }
+        let append_lock = append_lock_for(&path);
+        let _guard = append_lock.lock().await;
         let mut file = tokio::fs::OpenOptions::new()
             .append(true)
             .create(true)
             .open(&path)
             .await?;
-        file.write_all(line.as_bytes()).await?;
-        file.write_all(b"\n").await?;
+        file.write_all(&encoded).await?;
+        file.flush().await?;
+        Ok(())
+    }
+
+    /// Stage an idempotent user message before handing it to an already-running model.
+    pub async fn append_durable_user_message(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        message: &Message,
+        mode: &str,
+    ) -> Result<()> {
+        self.append_once(
+            session_id,
+            operation_id,
+            SessionEvent::System {
+                event: DURABLE_USER_MESSAGE_EVENT.into(),
+                data: serde_json::json!({
+                    "operation_id": operation_id,
+                    "message": message,
+                    "mode": mode,
+                }),
+            },
+        )
+        .await
+    }
+
+    /// Cancel a staged message after the runtime explicitly declined it. The ordinary queue may
+    /// then own delivery without creating two visible/history messages.
+    pub async fn cancel_durable_user_message(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+    ) -> Result<()> {
+        self.append_once(
+            session_id,
+            &format!("cancel:{operation_id}"),
+            SessionEvent::System {
+                event: DURABLE_USER_MESSAGE_CANCEL_EVENT.into(),
+                data: serde_json::json!({ "operation_id": operation_id }),
+            },
+        )
+        .await
+    }
+
+    async fn append_once(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        event: SessionEvent,
+    ) -> Result<()> {
+        let path = self.session_path(session_id);
+        let append_lock = append_lock_for(&path);
+        let _guard = append_lock.lock().await;
+        let mut existing = tokio::fs::read(&path).await.unwrap_or_default();
+
+        // A process crash can leave only the final record incomplete. Remove that tail before an
+        // idempotent retry so the file stays parseable and the complete operation can be written.
+        if !existing.is_empty() && !existing.ends_with(b"\n") {
+            let complete_len = existing
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |index| index + 1);
+            let file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .await?;
+            file.set_len(complete_len as u64).await?;
+            existing.truncate(complete_len);
+        }
+
+        if existing
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .any(|line| {
+                serde_json::from_slice::<SessionEvent>(line)
+                    .ok()
+                    .and_then(|event| durable_operation_id(&event).map(str::to_owned))
+                    .as_deref()
+                    == Some(operation_id)
+            })
+        {
+            return Ok(());
+        }
+
+        let mut encoded = serde_json::to_vec(&event)?;
+        encoded.push(b'\n');
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&path)
+            .await?;
+        file.write_all(&encoded).await?;
         file.flush().await?;
         Ok(())
     }
@@ -57,16 +190,22 @@ impl SessionStore {
             .await
             .map_err(|_| Error::SessionNotFound(session_id.to_string()))?;
 
+        let events = content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(serde_json::from_str::<SessionEvent>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let cancelled_operations = events
+            .iter()
+            .filter_map(cancelled_durable_operation_id)
+            .collect::<std::collections::HashSet<_>>();
+        let mut materialized_operations = std::collections::HashSet::new();
         let mut meta: Option<SessionMeta> = None;
         let mut messages: Vec<Message> = Vec::new();
         let mut usage = Usage::default();
         let mut tool_calls = 0u32;
 
-        for line in content.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let event: SessionEvent = serde_json::from_str(line)?;
+        for event in events {
             match event {
                 SessionEvent::Meta(m) => meta = Some(m),
                 SessionEvent::Message(msg) => messages.push(msg),
@@ -76,7 +215,23 @@ impl SessionStore {
                 SessionEvent::HistorySnapshot { messages: snapshot } => messages = snapshot,
                 SessionEvent::Usage(u) => usage += u,
                 SessionEvent::ToolCall { .. } | SessionEvent::ToolResult { .. } => tool_calls += 1,
-                SessionEvent::System { .. } => {}
+                SessionEvent::System { event, data } => {
+                    if event == DURABLE_USER_MESSAGE_EVENT {
+                        let operation_id =
+                            data.get("operation_id").and_then(serde_json::Value::as_str);
+                        if operation_id.is_some_and(|operation_id| {
+                            !cancelled_operations.contains(operation_id)
+                                && materialized_operations.insert(operation_id.to_string())
+                        }) {
+                            if let Some(message) = data
+                                .get("message")
+                                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                            {
+                                messages.push(message);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -206,6 +361,24 @@ impl SessionStore {
         }
         Self::atomic_write(&path, data.as_bytes()).await
     }
+}
+
+fn durable_operation_id(event: &SessionEvent) -> Option<&str> {
+    let SessionEvent::System { event, data } = event else {
+        return None;
+    };
+    if event != DURABLE_USER_MESSAGE_EVENT && event != DURABLE_USER_MESSAGE_CANCEL_EVENT {
+        return None;
+    }
+    data.get("operation_id")?.as_str()
+}
+
+fn cancelled_durable_operation_id(event: &SessionEvent) -> Option<String> {
+    let SessionEvent::System { event, data } = event else {
+        return None;
+    };
+    (event == DURABLE_USER_MESSAGE_CANCEL_EVENT)
+        .then(|| data.get("operation_id")?.as_str().map(str::to_owned))?
 }
 
 #[cfg(test)]
@@ -469,6 +642,107 @@ mod tests {
             .unwrap();
         let non_empty = content.lines().filter(|l| !l.trim().is_empty()).count();
         assert_eq!(non_empty, 6);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_store_handles_append_complete_jsonl_records() {
+        let (dir, store) = setup().await;
+        let session = store.create("m", "p").await.unwrap();
+        let session_id = session.meta.id;
+        let base_dir = dir.path().to_path_buf();
+        let mut writers = tokio::task::JoinSet::new();
+
+        for writer in 0..8 {
+            let base_dir = base_dir.clone();
+            let session_id = session_id.clone();
+            writers.spawn(async move {
+                let store = SessionStore::new(base_dir);
+                for item in 0..50 {
+                    store
+                        .append(
+                            &session_id,
+                            SessionEvent::Message(Message::user_text(format!(
+                                "writer-{writer}-item-{item}"
+                            ))),
+                        )
+                        .await
+                        .unwrap();
+                }
+            });
+        }
+        while let Some(result) = writers.join_next().await {
+            result.unwrap();
+        }
+
+        let content = tokio::fs::read_to_string(store.session_path(&session_id))
+            .await
+            .unwrap();
+        for line in content.lines() {
+            serde_json::from_str::<SessionEvent>(line).unwrap();
+        }
+        assert_eq!(store.load(&session_id).await.unwrap().messages.len(), 400);
+    }
+
+    #[tokio::test]
+    async fn durable_user_message_is_idempotent_and_cancellable() {
+        let (_dir, store) = setup().await;
+        let session = store.create("m", "p").await.unwrap();
+        let id = &session.meta.id;
+        let message = Message::user_text("guide the active run");
+
+        store
+            .append_durable_user_message(id, "operation-1", &message, "steer")
+            .await
+            .unwrap();
+        store
+            .append_durable_user_message(id, "operation-1", &message, "steer")
+            .await
+            .unwrap();
+        let loaded = store.load(id).await.unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].text_content(), "guide the active run");
+
+        store
+            .cancel_durable_user_message(id, "operation-1")
+            .await
+            .unwrap();
+        store
+            .cancel_durable_user_message(id, "operation-1")
+            .await
+            .unwrap();
+        assert!(store.load(id).await.unwrap().messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn durable_retry_repairs_an_incomplete_tail_before_appending() {
+        let (_dir, store) = setup().await;
+        let session = store.create("m", "p").await.unwrap();
+        let id = &session.meta.id;
+        let path = store.session_path(id);
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        file.write_all(b"{\"system\":").await.unwrap();
+        file.flush().await.unwrap();
+        drop(file);
+
+        store
+            .append_durable_user_message(
+                id,
+                "operation-after-crash",
+                &Message::user_text("recovered"),
+                "steer",
+            )
+            .await
+            .unwrap();
+
+        let content = tokio::fs::read_to_string(path).await.unwrap();
+        assert!(content
+            .lines()
+            .all(|line| serde_json::from_str::<SessionEvent>(line).is_ok()));
+        assert_eq!(store.load(id).await.unwrap().messages.len(), 1);
     }
 
     #[tokio::test]
