@@ -772,14 +772,17 @@ fn parse_openai_response(v: &Value) -> Result<CompletionResponse> {
 
     let usage = v
         .get("usage")
-        .map(|u| Usage {
-            input_tokens: u.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32,
-            output_tokens: u
-                .get("completion_tokens")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0) as u32,
-            cache_read_tokens: None,
-            cache_write_tokens: None,
+        .map(|u| {
+            let (cache_read_tokens, cache_write_tokens) = parse_cache_tokens(u);
+            Usage {
+                input_tokens: u.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32,
+                output_tokens: u
+                    .get("completion_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0) as u32,
+                cache_read_tokens,
+                cache_write_tokens,
+            }
         })
         .unwrap_or_default();
 
@@ -788,6 +791,30 @@ fn parse_openai_response(v: &Value) -> Result<CompletionResponse> {
         stop_reason,
         usage,
     })
+}
+
+/// 从 usage 对象解析缓存 token 数。DeepSeek 字段优先（真实 DeepSeek 响应同时
+/// 回传两套字段，优先 DeepSeek 字段避免双计数或错值，见
+/// docs/deepseek-cache-baseline.md）：`prompt_cache_hit_tokens` →
+/// cache_read_tokens，缺失时回落 OpenAI 官方风格
+/// `prompt_tokens_details.cached_tokens`；`prompt_cache_miss_tokens` →
+/// cache_write_tokens。字段都缺时回退 Some(0)，与"服务端未返回 usage"（整体
+/// 无 usage 键）区分开（docs/deepseek-prefix-cache.md §8）。
+fn parse_cache_tokens(usage: &Value) -> (Option<u32>, Option<u32>) {
+    let cache_read = usage
+        .get("prompt_cache_hit_tokens")
+        .and_then(|tokens| tokens.as_u64())
+        .or_else(|| {
+            usage
+                .pointer("/prompt_tokens_details/cached_tokens")
+                .and_then(|tokens| tokens.as_u64())
+        })
+        .unwrap_or(0) as u32;
+    let cache_write = usage
+        .get("prompt_cache_miss_tokens")
+        .and_then(|tokens| tokens.as_u64())
+        .unwrap_or(0) as u32;
+    (Some(cache_read), Some(cache_write))
 }
 
 fn parse_finish_reason(s: &str) -> StopReason {
@@ -1190,6 +1217,11 @@ fn parse_one_openai(
     }
 
     if let Some(usage) = value.get("usage") {
+        // DeepSeek 在 usage 帧中回传自动前缀缓存的命中/未命中 token 数
+        // （docs/deepseek-prefix-cache.md §3 A6，P0-B）。字段缺失时回退
+        // Some(0)，与"服务端未返回 usage 帧"（整体无 usage 键，无 Usage
+        // 事件）区分开：前者是已返回帧中的零命中，后者是服务端不支持。
+        let (cache_read_tokens, cache_write_tokens) = parse_cache_tokens(usage);
         events.push(StreamEvent::Usage(Usage {
             input_tokens: usage
                 .get("prompt_tokens")
@@ -1199,22 +1231,8 @@ fn parse_one_openai(
                 .get("completion_tokens")
                 .and_then(|tokens| tokens.as_u64())
                 .unwrap_or(0) as u32,
-            // DeepSeek 在 usage 帧中回传自动前缀缓存的命中/未命中 token 数
-            // （docs/deepseek-prefix-cache.md §3 A6，P0-B）。字段缺失时回退
-            // Some(0)，与"服务端未返回 usage 帧"（整体无 usage 键，无 Usage
-            // 事件）区分开：前者是已返回帧中的零命中，后者是服务端不支持。
-            cache_read_tokens: Some(
-                usage
-                    .get("prompt_cache_hit_tokens")
-                    .and_then(|tokens| tokens.as_u64())
-                    .unwrap_or(0) as u32,
-            ),
-            cache_write_tokens: Some(
-                usage
-                    .get("prompt_cache_miss_tokens")
-                    .and_then(|tokens| tokens.as_u64())
-                    .unwrap_or(0) as u32,
-            ),
+            cache_read_tokens,
+            cache_write_tokens,
         }));
     }
 
@@ -1473,6 +1491,87 @@ mod tests {
             .expect("usage event");
         assert_eq!(usage.cache_read_tokens, Some(0));
         assert_eq!(usage.cache_write_tokens, Some(0));
+    }
+
+    #[test]
+    fn usage_frame_falls_back_to_openai_cached_tokens() {
+        let mut tool_args = std::collections::HashMap::new();
+        let events = parse_one_openai(
+            r#"{"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":42}}}"#,
+            &mut tool_args,
+        );
+        let usage = events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::Usage(usage) => Some(usage),
+                _ => None,
+            })
+            .expect("usage event");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 20);
+        assert_eq!(usage.cache_read_tokens, Some(42));
+        assert_eq!(usage.cache_write_tokens, Some(0));
+    }
+
+    #[test]
+    fn response_parses_deepseek_cache_tokens() {
+        let response = parse_openai_response(&json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "prompt_cache_hit_tokens": 88,
+                "prompt_cache_miss_tokens": 12
+            }
+        }))
+        .expect("parse response");
+        assert_eq!(response.usage.input_tokens, 100);
+        assert_eq!(response.usage.output_tokens, 20);
+        assert_eq!(response.usage.cache_read_tokens, Some(88));
+        assert_eq!(response.usage.cache_write_tokens, Some(12));
+    }
+
+    #[test]
+    fn response_falls_back_to_openai_cached_tokens() {
+        let response = parse_openai_response(&json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "prompt_tokens_details": {"cached_tokens": 64}
+            }
+        }))
+        .expect("parse response");
+        assert_eq!(response.usage.cache_read_tokens, Some(64));
+        assert_eq!(response.usage.cache_write_tokens, Some(0));
+    }
+
+    #[test]
+    fn deepseek_cache_tokens_take_precedence_over_openai_details() {
+        // 真实 DeepSeek 响应同时回传两套字段（docs/deepseek-cache-baseline.md
+        // 第 19 行），DeepSeek 字段优先，避免双计数或错值。
+        let response = parse_openai_response(&json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "prompt_cache_hit_tokens": 88,
+                "prompt_cache_miss_tokens": 12,
+                "prompt_tokens_details": {"cached_tokens": 999}
+            }
+        }))
+        .expect("parse response");
+        assert_eq!(response.usage.cache_read_tokens, Some(88));
+        assert_eq!(response.usage.cache_write_tokens, Some(12));
     }
 
     #[test]

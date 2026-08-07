@@ -30,7 +30,7 @@ structured with headings and bullet points. You never invent APIs that do not ex
 uncertainty when you are not sure. You prefer showing a minimal reproducible example over abstract \
 advice. You respond in the language the user uses.";
 
-const ROUNDS: usize = 6;
+const ROUNDS: usize = 14;
 
 #[tokio::test]
 #[ignore = "需要真实 DeepSeek API key（DEEPSEEK_API_KEY 环境变量）"]
