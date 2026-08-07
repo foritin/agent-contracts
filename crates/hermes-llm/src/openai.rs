@@ -3,6 +3,9 @@
 //! 参见 `01-llm-provider.html §4.2`。system 作为消息角色注入；不支持 prompt
 //! caching。错误信息不含 api_key。
 
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
 use hermes_core::{
     Capabilities, CompletionRequest, CompletionResponse, ContentBlock, HostedToolFormat,
     HostedToolSpec, LlmProvider, Message, Role, StopReason, StreamEvent, ToolSpec, Usage,
@@ -14,6 +17,42 @@ use crate::url::openai_api_root;
 
 const MAX_ERROR_MESSAGE_CHARS: usize = 240;
 const MAX_ERROR_METADATA_CHARS: usize = 64;
+
+// ── 连接层重试（docs/deepseek-prefix-cache.md §5 P1-E）──────────────────
+//
+// 对齐 Reasonix `internal/provider/retry.go`：连接 + header 阶段失败时指数
+// 退避重试；body 流一旦开始就不重试（模型可能已产出 token）。重试复用同一
+// 请求体（`build_body` 结果），保证重试字节与首试逐字节一致，不破坏
+// DeepSeek 前缀缓存（PRD §4 原则 8）。
+
+/// 首试之后最多重试次数（总计最多 MAX_RETRIES + 1 次尝试）。
+const MAX_RETRIES: u32 = 10;
+/// 指数退避封顶：500ms * 2^(n-1)，最大 15s。
+const MAX_BACKOFF: Duration = Duration::from_secs(15);
+/// 服务端 `Retry-After` 的等待上限（限流窗口通常比自身退避封顶更长，长等
+/// 待可被取消，不会把用户锁死）。
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+/// 读取非 2xx 错误体的超时：网关在半开连接上发完 header 后可能停住 body，
+/// 没有该 deadline 重试循环会在 io 读取上无限阻塞。
+const ERROR_BODY_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+// ── 流空闲 watchdog（docs/deepseek-prefix-cache.md §5 P1-E）──────────────
+//
+// 对齐 Reasonix `openai.go:43-50`（defaultStreamIdleTimeout = 120s）：SSE 流
+// 超过该时长无任何新字节，视为半开 TCP 连接（代理切换、服务端静默），主动
+// 关闭连接并以可恢复错误终止流。与"连接断开"（瞬时传输错误）区分，调用方
+// 可据此用同一冻结请求重放。
+const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// 流空闲超时终止时发出的 `StopReason::Other` 标记，agent 层据此走恢复路径。
+const STREAM_IDLE_TIMEOUT_REASON: &str = "stream_idle_timeout";
+
+// ── 悬空工具调用对的占位结果（docs/deepseek-prefix-cache.md §5 P1-F）────
+//
+// 对齐 Reasonix `provider.go` 的 `interruptedToolResult`：assistant tool_calls
+// 必须有对应 tool 结果，否则 DeepSeek 直接 400
+// （"An assistant message with 'tool_calls' must be followed by tool messages…"）。
+const INTERRUPTED_TOOL_RESULT_PLACEHOLDER: &str =
+    "[no result: the previous turn was interrupted before this tool call completed]";
 
 pub struct OpenAiProvider {
     client: reqwest::Client,
@@ -67,8 +106,26 @@ impl OpenAiProvider {
             messages.push(json!({ "role": "system", "content": system }));
         }
 
-        for message in &request.messages {
-            messages.extend(messages_to_openai(message));
+        let model_lower = request.model.to_ascii_lowercase();
+        let deepseek_thinking = model_lower.contains("deepseek")
+            && matches!(request.inference.thinking.as_deref(), Some("enabled"));
+
+        // 发送前修复悬空工具调用对（Reasonix `SanitizeToolPairing`）：健康历史
+        // 零拷贝透传（返回 None），只有存在未配对 tool_call / 孤儿 ToolResult
+        // 时才构造修复副本。DeepSeek 对未配对的 assistant tool_calls 直接 400
+        // （docs/deepseek-prefix-cache.md §5 P1-F）。
+        let sanitized = sanitize_tool_pairing(&request.messages);
+        match &sanitized {
+            Some(msgs) => {
+                for message in msgs {
+                    messages.extend(messages_to_openai(message));
+                }
+            }
+            None => {
+                for message in &request.messages {
+                    messages.extend(messages_to_openai(message));
+                }
+            }
         }
 
         let mut body = json!({
@@ -76,9 +133,6 @@ impl OpenAiProvider {
             "messages": messages,
             "max_tokens": request.max_tokens,
         });
-        let model_lower = request.model.to_ascii_lowercase();
-        let deepseek_thinking = model_lower.contains("deepseek")
-            && matches!(request.inference.thinking.as_deref(), Some("enabled"));
         if let Some(temp) = request.temperature.filter(|_| !deepseek_thinking) {
             body["temperature"] = json!(temp);
         }
@@ -111,6 +165,15 @@ impl OpenAiProvider {
         if !tools.is_empty() {
             body["tools"] = json!(tools);
         }
+        // 键恒发（Reasonix `openai.go:688-735`，docs/deepseek-prefix-cache.md §5
+        // P1-F）：thinking 模式对 assistant tool_calls 轮恒发 `reasoning_content`
+        // 键（空串可接受，缺键 DeepSeek 400 "must be passed back"）；tool 消息
+        // 恒发 `name` 键（空值可接受，严格兼容口缺键 400）。
+        apply_key_emission(
+            body["messages"].as_array_mut().expect("messages array"),
+            deepseek_thinking,
+            request,
+        );
         body
     }
 }
@@ -178,22 +241,8 @@ fn openrouter_server_tool(
 impl LlmProvider for OpenAiProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
         let body = self.build_body(&request, false);
-        let resp = self
-            .client
-            .post(self.completions_url())
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                Error::Provider(sanitize_transport_error(&e.to_string(), &self.api_key))
-            })?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(map_api_error(status.as_u16(), &text, &self.api_key));
-        }
+        let resp =
+            send_with_retry(&self.client, &self.completions_url(), &self.api_key, &body).await?;
         let v: Value = resp
             .json()
             .await
@@ -206,23 +255,14 @@ impl LlmProvider for OpenAiProvider {
         request: CompletionRequest,
     ) -> Result<futures::stream::BoxStream<'static, StreamEvent>> {
         let body = self.build_body(&request, true);
-        let resp = self
-            .client
-            .post(self.completions_url())
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                Error::Provider(sanitize_transport_error(&e.to_string(), &self.api_key))
-            })?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(map_api_error(status.as_u16(), &text, &self.api_key));
-        }
-        Ok(Box::pin(parse_openai_sse(resp.bytes_stream())))
+        let resp =
+            send_with_retry(&self.client, &self.completions_url(), &self.api_key, &body).await?;
+        // 流空闲 watchdog：SSE 流超过 DEFAULT_STREAM_IDLE_TIMEOUT 无新字节即
+        // 视为流死（半开 TCP），主动关闭连接并以可恢复错误终止（P1-E）。
+        Ok(Box::pin(parse_openai_sse_with_idle_timeout(
+            resp.bytes_stream(),
+            DEFAULT_STREAM_IDLE_TIMEOUT,
+        )))
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -240,7 +280,287 @@ impl LlmProvider for OpenAiProvider {
     }
 }
 
+// ── 连接层重试（docs/deepseek-prefix-cache.md §5 P1-E）──────────────────
+
+/// 无 tokio 依赖的延时 future（crate 不依赖 tokio，futures 默认 features 也
+/// 不含 channel）：短暂线程 sleep 后通过共享 waker 槽唤醒等待方。
+/// 仅退避/错误体超时路径使用（失败时最多 spawn MAX_RETRIES 个短暂线程）；
+/// abort 时 future 被 drop，线程发送失败后自行退出，不泄漏。
+async fn thread_sleep(delay: Duration) {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let waker_slot: std::sync::Arc<std::sync::Mutex<Option<std::task::Waker>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (slot_for_thread, tx_for_thread) = (waker_slot.clone(), tx.clone());
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        if let Some(waker) = slot_for_thread.lock().unwrap().take() {
+            waker.wake();
+        }
+        let _ = tx_for_thread.send(());
+    });
+    let mut done = false;
+    futures::future::poll_fn(move |cx| {
+        use std::task::Poll;
+        if done {
+            return Poll::Ready(());
+        }
+        *waker_slot.lock().unwrap() = Some(cx.waker().clone());
+        match rx.try_recv() {
+            Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                done = true;
+                Poll::Ready(())
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => Poll::Pending,
+        }
+    })
+    .await
+}
+
+/// 只有 408 / 429 / 5xx 可能被退避重试救回；其余 4xx（400/401/402/422 …）
+/// 是调用方/配置问题，重试无意义（Reasonix `RetryableStatus`）。
+fn retryable_status(status: u16) -> bool {
+    matches!(status, 408 | 429 | 500..=599)
+}
+
+/// 指数退避：500ms * 2^(attempt-1) 封顶 MAX_BACKOFF；服务端给了
+/// `Retry-After` 则优先尊重它（封顶 MAX_RETRY_AFTER）。
+/// 未加抖动（无 rand 依赖；Reasonix 的 ±250ms jitter 非必需）。
+fn backoff_delay(attempt: u32, retry_after: Option<Duration>) -> Duration {
+    if let Some(after) = retry_after {
+        return after.min(MAX_RETRY_AFTER);
+    }
+    let base = Duration::from_millis(500 * 2u64.pow(attempt.saturating_sub(1)));
+    base.min(MAX_BACKOFF)
+}
+
+/// 解析 `Retry-After` 头（RFC 9110 delta-seconds 形式；HTTP-date 形式需要
+/// httpdate 依赖，目前不支持，返回 None 走自身退避）。
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    value.parse::<u64>().ok().map(Duration::from_secs)
+}
+
+/// 读取非 2xx 错误体，带 ERROR_BODY_READ_TIMEOUT 硬超时：网关在半开连接上
+/// 发完 header 后可能停住 body，没有该 deadline 重试循环会无限阻塞。
+async fn read_error_body(resp: reqwest::Response) -> String {
+    let text_fut = resp.text();
+    futures::pin_mut!(text_fut);
+    let timeout = thread_sleep(ERROR_BODY_READ_TIMEOUT);
+    futures::pin_mut!(timeout);
+    match futures::future::select(&mut text_fut, &mut timeout).await {
+        futures::future::Either::Left((result, _)) => result.unwrap_or_default(),
+        futures::future::Either::Right(_) => String::new(),
+    }
+}
+
+/// 发送请求并在连接 + header 阶段按需重试：传输错误与可重试状态码
+/// （408/429/5xx）指数退避重试（最多 MAX_RETRIES 次），`Retry-After` 优先；
+/// 4xx（含 AuthFailed）不重试；abort 通过 drop future 立即生效（重试退避的
+/// sleep 一并被取消，Reasonix `SendWithRetry` 语义）。body 复用同一 `Value`，
+/// 重试字节与首试逐字节一致（不破坏 DeepSeek 前缀缓存）。
+#[allow(unused_assignments)] // 保留最近一次错误供最终返回；重试循环覆盖是预期行为
+async fn send_with_retry(
+    client: &reqwest::Client,
+    completions_url: &str,
+    api_key: &str,
+    body: &Value,
+) -> Result<reqwest::Response> {
+    let mut attempt: u32 = 0;
+    let mut last_error: Option<Error> = None;
+    let mut retry_after: Option<Duration> = None;
+
+    loop {
+        attempt += 1;
+        if attempt > 1 {
+            let delay = backoff_delay(attempt - 1, retry_after);
+            tracing::debug!(attempt, ?delay, "provider request failed, retrying");
+            thread_sleep(delay).await;
+        }
+        retry_after = None;
+
+        let result = client
+            .post(completions_url)
+            .bearer_auth(api_key)
+            .json(body)
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    return Ok(resp);
+                }
+                retry_after = parse_retry_after(resp.headers());
+                let text = read_error_body(resp).await;
+                let err = map_api_error(status.as_u16(), &text, api_key);
+                if !retryable_status(status.as_u16()) {
+                    return Err(err);
+                }
+                last_error = Some(err);
+            }
+            Err(transport_err) => {
+                last_error = Some(Error::Provider(sanitize_transport_error(
+                    &transport_err.to_string(),
+                    api_key,
+                )));
+            }
+        }
+
+        if attempt > MAX_RETRIES {
+            return Err(last_error
+                .unwrap_or_else(|| Error::Provider("provider request failed".to_string())));
+        }
+    }
+}
+
 // ── 请求转换 ──────────────────────────────────────────────────
+
+/// 修复悬空工具调用对（Reasonix `SanitizeToolPairing` / `NormalizeMessages` 语义，
+/// docs/deepseek-prefix-cache.md §5 P1-F）。
+///
+/// OpenAI 兼容 API（含 DeepSeek）要求每个 assistant `tool_calls` 都必须有对应
+/// 的 `role=tool` 结果消息，且不允许存在无主（孤儿）的 tool 结果。中断/恢复
+/// 的历史可能携带未配对消息，DeepSeek 对这类请求直接 400。
+///
+/// 修复动作（只作用于发送前的临时副本，不触碰调用方持有的历史）：
+/// 1. 未被任何 ToolResult 响应的 tool_call → 紧跟其 assistant 消息补一条占位
+///    tool 消息（轮次保持完整，Reasonix `interruptedToolResult`）。
+/// 2. 没有对应 tool_call 的孤儿 ToolResult 块 → 丢弃；整条消息只剩孤儿结果
+///    时丢弃该消息。
+///
+/// 健康历史（每个 tool_call 都有结果、无孤儿）返回 `None`，调用方走零拷贝
+/// 快路径，保持前缀缓存字节稳定（PRD §4 原则 4）。
+fn sanitize_tool_pairing(messages: &[Message]) -> Option<Vec<Message>> {
+    let declared: HashSet<&str> = messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|block| block.tool_id())
+        .collect();
+    let answered: HashSet<&str> = messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|block| block.tool_use_id())
+        .collect();
+
+    let mut needs_fix = false;
+    for id in &declared {
+        if !answered.contains(id) {
+            needs_fix = true;
+            break;
+        }
+    }
+    if !needs_fix {
+        for m in messages {
+            if m.content.iter().any(|block| {
+                matches!(block, ContentBlock::ToolResult { tool_use_id, .. }
+                    if !declared.contains(tool_use_id.as_str()))
+            }) {
+                needs_fix = true;
+                break;
+            }
+        }
+    }
+    if !needs_fix {
+        return None;
+    }
+
+    let mut out: Vec<Message> = Vec::with_capacity(messages.len() + declared.len());
+    for m in messages {
+        if m.role == Role::User && m.content.iter().any(|block| block.is_tool_result()) {
+            let filtered: Vec<ContentBlock> = m
+                .content
+                .iter()
+                .filter(|block| match block {
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        declared.contains(tool_use_id.as_str())
+                    }
+                    _ => true,
+                })
+                .cloned()
+                .collect();
+            if filtered.is_empty() {
+                // 整条消息只剩孤儿结果 → 丢弃
+                continue;
+            }
+            out.push(if filtered.len() == m.content.len() {
+                m.clone()
+            } else {
+                Message {
+                    role: m.role,
+                    content: filtered,
+                }
+            });
+        } else {
+            out.push(m.clone());
+        }
+
+        // 未配对 tool_call → 紧跟 assistant 消息补占位结果（tool 消息必须紧随
+        // assistant tool_calls 才能通过 API 配对校验）。
+        if m.role == Role::Assistant {
+            for block in &m.content {
+                if let ContentBlock::ToolUse { id, .. } = block {
+                    if !answered.contains(id.as_str()) {
+                        out.push(Message {
+                            role: Role::User,
+                            content: vec![ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: INTERRUPTED_TOOL_RESULT_PLACEHOLDER.to_string(),
+                                is_error: true,
+                            }],
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+/// 键恒发（Reasonix `openai.go:688-735`，docs/deepseek-prefix-cache.md §5 P1-F）：
+/// - thinking 模式（DeepSeek）对 assistant `tool_calls` 轮恒发 `reasoning_content`
+///   键：空串可接受，缺键 DeepSeek 400 "must be passed back"；thinking 关闭时
+///   保持历史字节原样（该轮没有 reasoning 可回传，多发的键反而改变前缀）。
+/// - `role=tool` 消息恒发 `name` 键：空值可接受，严格兼容口（MiMo 等）缺键
+///   400。name 优先取历史 assistant ToolUse 中的真实函数名，找不到才为空串。
+fn apply_key_emission(
+    messages: &mut [Value],
+    deepseek_thinking: bool,
+    request: &CompletionRequest,
+) {
+    let tool_names: HashMap<&str, &str> = request
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, name, .. } => Some((id.as_str(), name.as_str())),
+            _ => None,
+        })
+        .collect();
+
+    for m in messages.iter_mut() {
+        let role = m.get("role").and_then(|r| r.as_str()).map(str::to_string);
+        let is_assistant_tool_turn = deepseek_thinking
+            && role.as_deref() == Some("assistant")
+            && m.get("tool_calls").is_some();
+        if is_assistant_tool_turn && m.get("reasoning_content").is_none() {
+            m["reasoning_content"] = Value::String(String::new());
+        }
+        if role.as_deref() == Some("tool") && m.get("name").is_none() {
+            let name = m
+                .get("tool_call_id")
+                .and_then(|id| id.as_str())
+                .and_then(|id| tool_names.get(id))
+                .copied()
+                .unwrap_or("");
+            m["name"] = Value::String(name.to_string());
+        }
+    }
+}
 
 pub fn messages_to_openai(msg: &Message) -> Vec<Value> {
     // OpenAI 要求每个 tool_call 都有对应 role=tool 回复。一条内部 User 消息
@@ -663,8 +983,15 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 
 // ── SSE 流解析 ────────────────────────────────────────────────
 
+/// SSE 字节流的中断原因。`IdleTimeout` 是流空闲 watchdog 主动掐断（可恢复，
+/// 调用方可用同一冻结请求重放）；`Transport` 是底层连接瞬时错误（与流死区分）。
+enum SseChunkError {
+    Transport(reqwest::Error),
+    IdleTimeout,
+}
+
 fn parse_openai_sse(
-    byte_stream: impl futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>,
+    byte_stream: impl futures::Stream<Item = std::result::Result<bytes::Bytes, SseChunkError>>,
 ) -> impl futures::Stream<Item = StreamEvent> {
     use futures::StreamExt;
     let mut buffer = String::new();
@@ -676,7 +1003,24 @@ fn parse_openai_sse(
         .map(move |chunk| {
             let chunk = match chunk {
                 Ok(c) => c,
-                Err(_) => return Vec::new(),
+                Err(SseChunkError::IdleTimeout) => {
+                    // 流空闲 watchdog 触发：连接已关闭，流以可恢复错误终止。
+                    // 与连接断开（Transport）区分：agent 层据此用同一冻结
+                    // 请求重放（docs/deepseek-prefix-cache.md §5 P1-E）。
+                    if !stopped {
+                        stopped = true;
+                        return vec![StreamEvent::Stop {
+                            reason: StopReason::Other(STREAM_IDLE_TIMEOUT_REASON.to_string()),
+                        }];
+                    }
+                    return Vec::new();
+                }
+                // 底层传输错误：保持既有行为（静默终止，不补 Stop），与
+                // watchdog 掐断的显式标记区分。
+                Err(SseChunkError::Transport(error)) => {
+                    tracing::debug!(error = %error, "provider stream transport error");
+                    return Vec::new();
+                }
             };
             buffer.push_str(&String::from_utf8_lossy(&chunk));
             let mut events = Vec::new();
@@ -715,6 +1059,73 @@ fn parse_openai_sse(
             events
         })
         .flat_map(futures::stream::iter)
+}
+
+/// 给 SSE 字节流加流空闲 watchdog（docs/deepseek-prefix-cache.md §5 P1-E，
+/// 对齐 Reasonix `readStream` 的 idle watchdog）。
+///
+/// 机制（无 tokio 依赖，futures 默认 features 不含 channel）：
+/// - 一个 watchdog 线程以 `idle_timeout` 为周期等待"活动"信号（std mpsc
+///   `recv_timeout`）；每个字节 chunk 到达时主循环发送一次信号重置计时。
+/// - watchdog 超时（半开 TCP：代理切换、服务端静默，不发 RST）→ 置 stalled
+///   标志并从共享 waker 槽唤醒主循环 → 主循环终止流并产出
+///   `SseChunkError::IdleTimeout` 一次，由 [`parse_openai_sse`] 转成可恢复的
+///   `Stop(Other("stream_idle_timeout"))`；消费方停止拉取后底层 reqwest body
+///   被 drop，连接随之关闭。
+/// - 正常结束（EOF）或流被 drop → watchdog 线程在信号通道断开后自行退出。
+fn parse_openai_sse_with_idle_timeout(
+    byte_stream: impl futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>
+        + 'static,
+    idle_timeout: Duration,
+) -> impl futures::Stream<Item = StreamEvent> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    let stalled = Arc::new(AtomicBool::new(false));
+    // 共享 waker 槽：主循环每次 poll 更新，watchdog 超时后借此唤醒挂起的读。
+    let waker_slot: Arc<Mutex<Option<std::task::Waker>>> = Arc::new(Mutex::new(None));
+    let (activity_tx, activity_rx) = std::sync::mpsc::channel::<()>();
+    let watchdog_stalled = stalled.clone();
+    let watchdog_slot = waker_slot.clone();
+    std::thread::spawn(move || loop {
+        match activity_rx.recv_timeout(idle_timeout) {
+            Ok(()) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                watchdog_stalled.store(true, Ordering::SeqCst);
+                if let Some(waker) = watchdog_slot.lock().unwrap().take() {
+                    waker.wake();
+                }
+                break;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    });
+
+    let mut inner = Box::pin(byte_stream);
+    let mut terminated = false;
+    let watched = futures::stream::poll_fn(move |cx| {
+        use std::task::Poll;
+        if terminated {
+            return Poll::Ready(None);
+        }
+        *waker_slot.lock().unwrap() = Some(cx.waker().clone());
+        if stalled.load(Ordering::SeqCst) {
+            terminated = true;
+            return Poll::Ready(Some(Err(SseChunkError::IdleTimeout)));
+        }
+        match inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(item)) => {
+                let _ = activity_tx.send(());
+                Poll::Ready(Some(item.map_err(SseChunkError::Transport)))
+            }
+            Poll::Ready(None) => {
+                terminated = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    });
+    parse_openai_sse(watched)
 }
 
 fn parse_one_openai(
@@ -1250,5 +1661,434 @@ mod tests {
             "",
         );
         assert_eq!(e.to_string(), "API error: 500 - request failed");
+    }
+
+    // ── P1-F 键恒发（docs/deepseek-prefix-cache.md §5 P1-F）────────────
+
+    fn assistant_tool_call_message(id: &str, name: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input: json!({"x": 1}),
+            }],
+        }
+    }
+
+    fn tool_result_message(id: &str, content: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id.into(),
+                content: content.into(),
+                is_error: false,
+            }],
+        }
+    }
+
+    fn tool_round_request(model: &str, messages: Vec<Message>) -> CompletionRequest {
+        CompletionRequest {
+            model: model.into(),
+            system: None,
+            messages,
+            tools: vec![],
+            hosted_tools: vec![],
+            max_tokens: 16,
+            temperature: None,
+            enable_caching: false,
+            inference: hermes_core::InferenceOptions {
+                thinking: Some("enabled".into()),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn deepseek_thinking_emits_reasoning_content_key_on_tool_call_turns() {
+        // thinking 模式对 assistant tool_calls 轮恒发 reasoning_content 键
+        // （空串可接受，缺键 DeepSeek 400 "must be passed back"）。
+        let p = OpenAiProvider::new(
+            "k".into(),
+            "deepseek-chat".into(),
+            "https://api.deepseek.com".into(),
+        );
+        let req = tool_round_request(
+            "deepseek-chat",
+            vec![
+                assistant_tool_call_message("t1", "read"),
+                tool_result_message("t1", "ok"),
+            ],
+        );
+        let body = p.build_body(&req, false);
+        let msgs = body["messages"].as_array().unwrap();
+        let assistant = &msgs[0];
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(assistant["tool_calls"][0]["function"]["name"], "read");
+        assert!(
+            assistant.get("reasoning_content").is_some(),
+            "assistant tool_calls turn must always carry reasoning_content key"
+        );
+        assert_eq!(assistant["reasoning_content"], "");
+    }
+
+    #[test]
+    fn tool_messages_always_carry_name_key() {
+        // tool 消息恒发 name 键，值优先取历史 assistant ToolUse 的函数名。
+        let p = OpenAiProvider::new(
+            "k".into(),
+            "deepseek-chat".into(),
+            "https://api.deepseek.com".into(),
+        );
+        let req = tool_round_request(
+            "deepseek-chat",
+            vec![
+                assistant_tool_call_message("t1", "read"),
+                tool_result_message("t1", "ok"),
+            ],
+        );
+        let body = p.build_body(&req, false);
+        let msgs = body["messages"].as_array().unwrap();
+        let tool = &msgs[1];
+        assert_eq!(tool["role"], "tool");
+        assert_eq!(tool["tool_call_id"], "t1");
+        assert_eq!(
+            tool["name"], "read",
+            "tool message name should be backfilled from the assistant turn"
+        );
+    }
+
+    #[test]
+    fn non_thinking_deepseek_keeps_history_bytes_unchanged() {
+        // thinking 关闭（或非 deepseek 模型）时不给 assistant tool_calls 轮
+        // 添加 reasoning_content 键——保持既有字节，避免改变前缀缓存形状。
+        let p = OpenAiProvider::new(
+            "k".into(),
+            "deepseek-chat".into(),
+            "https://api.deepseek.com".into(),
+        );
+        let mut req = tool_round_request(
+            "deepseek-chat",
+            vec![
+                assistant_tool_call_message("t1", "read"),
+                tool_result_message("t1", "ok"),
+            ],
+        );
+        req.inference.thinking = None;
+        let body = p.build_body(&req, false);
+        let msgs = body["messages"].as_array().unwrap();
+        assert!(msgs[0].get("reasoning_content").is_none());
+        // tool 消息的 name 键仍然恒发（对所有 provider）
+        assert!(msgs[1].get("name").is_some());
+
+        let generic =
+            OpenAiProvider::new("k".into(), "gpt".into(), "https://api.openai.com".into());
+        let body = generic.build_body(&req, false);
+        let msgs = body["messages"].as_array().unwrap();
+        assert!(msgs[0].get("reasoning_content").is_none());
+        assert!(msgs[1].get("name").is_some());
+    }
+
+    // ── P1-F SanitizeToolPairing（docs/deepseek-prefix-cache.md §5 P1-F）─
+
+    #[test]
+    fn dangling_tool_call_gets_placeholder_result() {
+        // assistant 声明 t1、t2 两个调用，但只有 t1 有结果：t2 必须补占位
+        // tool 消息，否则 DeepSeek 400 "must be followed by tool messages"。
+        let p = OpenAiProvider::new(
+            "k".into(),
+            "deepseek-chat".into(),
+            "https://api.deepseek.com".into(),
+        );
+        let assistant = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "read".into(),
+                    input: json!({"x": 1}),
+                },
+                ContentBlock::ToolUse {
+                    id: "t2".into(),
+                    name: "write".into(),
+                    input: json!({"y": 2}),
+                },
+            ],
+        };
+        let req = tool_round_request(
+            "deepseek-chat",
+            vec![assistant, tool_result_message("t1", "ok")],
+        );
+        let body = p.build_body(&req, false);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3, "assistant + placeholder + t1 result");
+        assert_eq!(msgs[0]["role"], "assistant");
+        assert_eq!(msgs[0]["tool_calls"].as_array().unwrap().len(), 2);
+        // 占位 tool 消息紧跟 assistant（配对校验要求 tool 消息紧随其后）
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[1]["tool_call_id"], "t2");
+        assert!(msgs[1]["content"].as_str().unwrap().contains("no result"));
+        assert_eq!(msgs[2]["role"], "tool");
+        assert_eq!(msgs[2]["tool_call_id"], "t1");
+    }
+
+    #[test]
+    fn orphan_tool_result_is_dropped() {
+        // t2 的结果没有对应 tool_call → 孤儿，发送前丢弃。
+        let p = OpenAiProvider::new(
+            "k".into(),
+            "deepseek-chat".into(),
+            "https://api.deepseek.com".into(),
+        );
+        let orphan_results = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "ghost".into(),
+                    content: "orphan".into(),
+                    is_error: false,
+                },
+            ],
+        };
+        let req = tool_round_request(
+            "deepseek-chat",
+            vec![assistant_tool_call_message("t1", "read"), orphan_results],
+        );
+        let body = p.build_body(&req, false);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2, "assistant + one tool result");
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[1]["tool_call_id"], "t1");
+    }
+
+    #[test]
+    fn healthy_history_needs_no_pairing_repair() {
+        let messages = vec![
+            assistant_tool_call_message("t1", "read"),
+            tool_result_message("t1", "ok"),
+        ];
+        assert!(sanitize_tool_pairing(&messages).is_none());
+    }
+
+    // ── P1-E 退避计算（docs/deepseek-prefix-cache.md §5 P1-E）──────────
+
+    #[test]
+    fn backoff_delay_doubles_then_caps_and_honors_retry_after() {
+        assert_eq!(backoff_delay(1, None), Duration::from_millis(500));
+        assert_eq!(backoff_delay(2, None), Duration::from_millis(1000));
+        assert_eq!(backoff_delay(3, None), Duration::from_millis(2000));
+        // 500ms * 2^5 = 16s > 15s 封顶
+        assert_eq!(backoff_delay(6, None), MAX_BACKOFF);
+        // Retry-After 优先，且封顶 60s
+        assert_eq!(
+            backoff_delay(1, Some(Duration::from_secs(5))),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            backoff_delay(1, Some(Duration::from_secs(120))),
+            MAX_RETRY_AFTER
+        );
+    }
+
+    // ── P1-E 流空闲 watchdog（docs/deepseek-prefix-cache.md §5 P1-E）────
+
+    #[tokio::test]
+    async fn idle_stream_timeout_terminates_with_recoverable_stop() {
+        use futures::StreamExt;
+        let first: std::result::Result<bytes::Bytes, reqwest::Error> =
+            Ok(bytes::Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            ));
+        let stalled =
+            futures::stream::pending::<std::result::Result<bytes::Bytes, reqwest::Error>>();
+        let stream = futures::stream::once(async { first }).chain(stalled);
+
+        let mut events = parse_openai_sse_with_idle_timeout(stream, Duration::from_millis(100));
+        let mut seen = Vec::new();
+        while let Some(ev) = events.next().await {
+            seen.push(ev);
+        }
+        assert_eq!(seen.len(), 2, "delta + idle-timeout stop");
+        assert!(matches!(&seen[0], StreamEvent::TextDelta { text } if text == "hi"));
+        match &seen[1] {
+            StreamEvent::Stop {
+                reason: StopReason::Other(msg),
+            } => assert!(
+                msg.contains(STREAM_IDLE_TIMEOUT_REASON),
+                "recoverable idle-timeout marker expected, got {msg}"
+            ),
+            other => panic!("expected idle-timeout stop, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn active_stream_finishes_before_watchdog_fires() {
+        use futures::StreamExt;
+        let data = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+        let stream = futures::stream::once(async {
+            Ok::<_, reqwest::Error>(bytes::Bytes::from_static(data))
+        });
+
+        let mut events = parse_openai_sse_with_idle_timeout(stream, Duration::from_secs(30));
+        let mut seen = Vec::new();
+        while let Some(ev) = events.next().await {
+            seen.push(ev);
+        }
+        assert!(matches!(
+            seen.as_slice(),
+            [
+                StreamEvent::TextDelta { .. },
+                StreamEvent::Stop {
+                    reason: StopReason::EndTurn
+                }
+            ]
+        ));
+    }
+
+    // ── P1-E 连接层重试（docs/deepseek-prefix-cache.md §5 P1-E）────────
+
+    /// 读取一个 HTTP 请求（header + Content-Length body），返回 body 文本。
+    async fn read_http_request_body(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 2048];
+        loop {
+            let n = socket.read(&mut tmp).await.expect("read headers");
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let header_end = buf
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("header terminator")
+            + 4;
+        let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower
+                    .strip_prefix("content-length:")
+                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+            })
+            .unwrap_or(0);
+        while buf.len() < header_end + content_length {
+            let n = socket.read(&mut tmp).await.expect("read body");
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        String::from_utf8_lossy(&buf[header_end..header_end + content_length]).to_string()
+    }
+
+    async fn write_http_response(
+        socket: &mut tokio::net::TcpStream,
+        status: u16,
+        reason: &str,
+        body: &str,
+    ) {
+        use tokio::io::AsyncWriteExt;
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write response");
+    }
+
+    #[tokio::test]
+    async fn transient_failure_is_retried_with_identical_body() {
+        use std::sync::{Arc, Mutex};
+
+        let bodies: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let bodies_for_server = bodies.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request_body(&mut socket).await;
+                bodies_for_server.lock().unwrap().push(request);
+                let is_first = bodies_for_server.lock().unwrap().len() == 1;
+                if is_first {
+                    write_http_response(
+                        &mut socket,
+                        500,
+                        "Internal Server Error",
+                        r#"{"error":{"message":"boom"}}"#,
+                    )
+                    .await;
+                } else {
+                    write_http_response(
+                        &mut socket,
+                        200,
+                        "OK",
+                        r#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
+                    )
+                    .await;
+                }
+            }
+        });
+
+        let p = OpenAiProvider::new("k".into(), "m".into(), format!("http://{addr}"));
+        let req = tool_round_request("m", vec![Message::user_text("hello")]);
+        let resp = p.complete(req).await.expect("retry should succeed");
+        assert_eq!(resp.text(), "hi");
+
+        let recorded = bodies.lock().unwrap();
+        assert_eq!(recorded.len(), 2, "first 5xx must be retried");
+        assert_eq!(
+            recorded[0], recorded[1],
+            "retry must reuse identical request body bytes (prefix cache)"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn four_hundred_is_not_retried() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_server = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                hits_for_server.fetch_add(1, Ordering::SeqCst);
+                let _ = read_http_request_body(&mut socket).await;
+                write_http_response(
+                    &mut socket,
+                    400,
+                    "Bad Request",
+                    r#"{"error":{"message":"bad request"}}"#,
+                )
+                .await;
+            }
+        });
+
+        let p = OpenAiProvider::new("k".into(), "m".into(), format!("http://{addr}"));
+        let req = tool_round_request("m", vec![Message::user_text("hello")]);
+        let err = p.complete(req).await.expect_err("400 must fail");
+        match &err {
+            Error::ApiError { status: 400, .. } => {}
+            other => panic!("expected ApiError 400, got {other}"),
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "4xx must not be retried");
+        server.abort();
     }
 }
