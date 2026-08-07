@@ -57,7 +57,9 @@ impl LlmProvider for DeepSeekProvider {
             supports_streaming: true,
             supports_tool_use: true,
             supports_vision: false,
-            supports_prompt_caching: false,
+            // DeepSeek 对字节稳定前缀自动缓存 KV（无需 API 开关），能力声明置 true
+            // （docs/deepseek-prefix-cache.md §3 A8，P0-B）。
+            supports_prompt_caching: true,
             max_context_tokens: self.max_context_tokens,
         }
     }
@@ -75,7 +77,7 @@ mod tests {
     fn name_and_capabilities() {
         let p = DeepSeekProvider::new("k".into(), "deepseek-chat".into());
         assert_eq!(p.name(), "deepseek");
-        assert!(!p.capabilities().supports_prompt_caching);
+        assert!(p.capabilities().supports_prompt_caching);
     }
 
     #[test]

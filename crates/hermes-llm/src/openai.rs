@@ -40,13 +40,21 @@ impl OpenAiProvider {
         format!("{}/chat/completions", openai_api_root(&self.base_url))
     }
 
-    /// 官方 OpenAI 端点支持在流末额外返回 usage；兼容接口不假定支持该扩展。
+    /// 官方 OpenAI 端点与 DeepSeek 端点支持在流末额外返回 usage 帧；其余
+    /// OpenAI 兼容接口不假定支持该扩展。
+    ///
+    /// DeepSeek 的自动前缀缓存字段（`prompt_cache_hit_tokens` /
+    /// `prompt_cache_miss_tokens`）只在 usage 帧中出现，不带
+    /// `stream_options.include_usage` 则真实流式会话收不到 usage 帧
+    /// （docs/deepseek-prefix-cache.md §3 A14，P0-B 前置）。
     fn supports_stream_usage(&self) -> bool {
         reqwest::Url::parse(self.base_url.trim())
             .ok()
             .and_then(|url| {
-                url.host_str()
-                    .map(|host| host.eq_ignore_ascii_case("api.openai.com"))
+                url.host_str().map(|host| {
+                    host.eq_ignore_ascii_case("api.openai.com")
+                        || host.eq_ignore_ascii_case("api.deepseek.com")
+                })
             })
             .unwrap_or(false)
     }
@@ -780,8 +788,22 @@ fn parse_one_openai(
                 .get("completion_tokens")
                 .and_then(|tokens| tokens.as_u64())
                 .unwrap_or(0) as u32,
-            cache_read_tokens: None,
-            cache_write_tokens: None,
+            // DeepSeek 在 usage 帧中回传自动前缀缓存的命中/未命中 token 数
+            // （docs/deepseek-prefix-cache.md §3 A6，P0-B）。字段缺失时回退
+            // Some(0)，与"服务端未返回 usage 帧"（整体无 usage 键，无 Usage
+            // 事件）区分开：前者是已返回帧中的零命中，后者是服务端不支持。
+            cache_read_tokens: Some(
+                usage
+                    .get("prompt_cache_hit_tokens")
+                    .and_then(|tokens| tokens.as_u64())
+                    .unwrap_or(0) as u32,
+            ),
+            cache_write_tokens: Some(
+                usage
+                    .get("prompt_cache_miss_tokens")
+                    .and_then(|tokens| tokens.as_u64())
+                    .unwrap_or(0) as u32,
+            ),
         }));
     }
 
@@ -979,6 +1001,11 @@ mod tests {
             "gpt".into(),
             "https://api.openai.com/v1".into(),
         );
+        let deepseek = OpenAiProvider::new(
+            "key".into(),
+            "deepseek-chat".into(),
+            "https://api.deepseek.com".into(),
+        );
         let compatible = OpenAiProvider::new(
             "key".into(),
             "model".into(),
@@ -986,12 +1013,55 @@ mod tests {
         );
 
         let official_body = official.build_body(&req, true);
+        let deepseek_body = deepseek.build_body(&req, true);
         let compatible_body = compatible.build_body(&req, true);
 
         assert_eq!(official_body["stream"], true);
         assert_eq!(official_body["stream_options"]["include_usage"], true);
+        // DeepSeek 前缀缓存字段只出现在 usage 帧中，必须请求 include_usage
+        // （docs/deepseek-prefix-cache.md §3 A14，P0-B 前置）。
+        assert_eq!(deepseek_body["stream"], true);
+        assert_eq!(deepseek_body["stream_options"]["include_usage"], true);
         assert_eq!(compatible_body["stream"], true);
         assert!(compatible_body.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn usage_frame_parses_deepseek_cache_tokens() {
+        let mut tool_args = std::collections::HashMap::new();
+        let events = parse_one_openai(
+            r#"{"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_cache_hit_tokens":123,"prompt_cache_miss_tokens":7}}"#,
+            &mut tool_args,
+        );
+        let usage = events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::Usage(usage) => Some(usage),
+                _ => None,
+            })
+            .expect("usage event");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 20);
+        assert_eq!(usage.cache_read_tokens, Some(123));
+        assert_eq!(usage.cache_write_tokens, Some(7));
+    }
+
+    #[test]
+    fn usage_frame_defaults_missing_cache_fields_to_zero() {
+        let mut tool_args = std::collections::HashMap::new();
+        let events = parse_one_openai(
+            r#"{"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+            &mut tool_args,
+        );
+        let usage = events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::Usage(usage) => Some(usage),
+                _ => None,
+            })
+            .expect("usage event");
+        assert_eq!(usage.cache_read_tokens, Some(0));
+        assert_eq!(usage.cache_write_tokens, Some(0));
     }
 
     #[test]
