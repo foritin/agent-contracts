@@ -108,9 +108,10 @@ async fn deepseek_prefix_cache_hit_curve() {
         .map(|(_, _, rate)| *rate)
         .collect();
     let tail_avg = tail.iter().sum::<f32>() / tail.len() as f32;
-    eprintln!(
-        "[probe] tail_avg(3) = {tail_avg:.1}% （对照 baseline 第二轮 80.5%、守卫阈值 90%）"
-    );
+    eprintln!("[probe] tail_avg(3) = {tail_avg:.1}% （对照 baseline 第二轮 80.5%、守卫阈值 90%）");
     // 探针不硬断言（真实网络/限流可能影响单次运行），只输出曲线供人工对照。
-    assert!(tail_avg > 0.0, "真实 API 未观测到任何缓存命中——前缀可能不稳定");
+    assert!(
+        tail_avg > 0.0,
+        "真实 API 未观测到任何缓存命中——前缀可能不稳定"
+    );
 }
