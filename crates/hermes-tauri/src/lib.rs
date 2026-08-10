@@ -128,6 +128,7 @@ mod tests {
                         max_tokens: None,
                         temperature: None,
                         protocol: None,
+                        provider_kind: None,
                     },
                 );
                 m

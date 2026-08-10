@@ -33,7 +33,9 @@ impl DeepSeekProvider {
             .filter(|url| !url.trim().is_empty())
             .unwrap_or_else(|| DEEPSEEK_BASE_URL.to_string());
         Self {
-            inner: OpenAiProvider::new(api_key, model, base_url),
+            // 即使用户把 DeepSeek 指向自定义网关，也必须请求流式 usage，才能
+            // 观测 prompt_cache_hit/miss_tokens。兼容性回退由 OpenAiProvider 处理。
+            inner: OpenAiProvider::new(api_key, model, base_url).with_stream_usage(),
             max_context_tokens,
         }
     }
