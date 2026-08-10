@@ -44,6 +44,9 @@ pub struct ProviderConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    /// Stable catalog/vendor identity. Display names and gateway URLs remain freely editable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,6 +71,7 @@ impl fmt::Debug for ProviderConfig {
             .field("base_url", &self.base_url)
             .field("api_key", &"***")
             .field("model", &self.model)
+            .field("provider_kind", &self.provider_kind)
             .field("max_tokens", &self.max_tokens)
             .field("temperature", &self.temperature)
             .field("protocol", &self.protocol)
@@ -490,10 +494,37 @@ memories_dir = "/tmp/h/m"
             max_tokens: None,
             temperature: None,
             protocol: None,
+            provider_kind: None,
         };
         let dbg = format!("{:?}", config);
         assert!(!dbg.contains("sk-secret-12345"), "api_key leaked: {dbg}");
         assert!(dbg.contains("***"));
+    }
+
+    #[test]
+    fn provider_kind_roundtrips_while_legacy_configs_default_to_none() {
+        let with_identity: ProviderConfig = toml::from_str(
+            r#"
+base_url = "https://relay.example/v1"
+api_key = "secret"
+model = "deepseek-v4-flash"
+provider_kind = "deepseek"
+"#,
+        )
+        .unwrap();
+        assert_eq!(with_identity.provider_kind.as_deref(), Some("deepseek"));
+        let persisted = toml::to_string(&with_identity).unwrap();
+        assert!(persisted.contains("provider_kind = \"deepseek\""));
+
+        let legacy: ProviderConfig = toml::from_str(
+            r#"
+base_url = "https://api.deepseek.com"
+api_key = "secret"
+model = "deepseek-v4-pro"
+"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.provider_kind, None);
     }
 
     #[test]
@@ -509,6 +540,7 @@ memories_dir = "/tmp/h/m"
                 max_tokens: None,
                 temperature: None,
                 protocol: None,
+                provider_kind: None,
             },
         );
         let r = config.validate();
@@ -528,6 +560,7 @@ memories_dir = "/tmp/h/m"
                 max_tokens: None,
                 temperature: None,
                 protocol: None,
+                provider_kind: None,
             },
         );
         let r = config.validate();

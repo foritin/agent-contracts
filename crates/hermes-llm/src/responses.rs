@@ -55,6 +55,9 @@ pub struct ResponsesProvider {
     model: String,
     reasoning: ReasoningMode,
     max_context_tokens: u32,
+    deepseek_automatic_cache: bool,
+    supports_vision: bool,
+    provider_name: &'static str,
 }
 
 impl ResponsesProvider {
@@ -66,7 +69,21 @@ impl ResponsesProvider {
             model,
             reasoning: ReasoningMode::default(),
             max_context_tokens: 200_000,
+            deepseek_automatic_cache: false,
+            supports_vision: true,
+            provider_name: "openai_responses",
         }
+    }
+
+    /// DeepSeek Responses 仍使用无状态全历史重放，但能力、上下文窗口与缓存
+    /// usage 语义必须保留 DeepSeek 身份，不能退化为通用 Responses provider。
+    pub fn new_deepseek(api_key: String, model: String, base_url: String) -> Self {
+        let mut provider = Self::new(api_key, model, base_url);
+        provider.max_context_tokens = 1_000_000;
+        provider.deepseek_automatic_cache = true;
+        provider.supports_vision = false;
+        provider.provider_name = "deepseek_responses";
+        provider
     }
 
     /// 开启加密 reasoning 回传。只对 OpenAI / xAI 有意义。
@@ -161,7 +178,7 @@ impl LlmProvider for ResponsesProvider {
             .json()
             .await
             .map_err(|e| Error::Provider(format!("invalid response json: {e}")))?;
-        parse_responses_response(&value, self.reasoning)
+        parse_responses_response_with_cache(&value, self.reasoning, self.deepseek_automatic_cache)
     }
 
     async fn stream(
@@ -185,21 +202,24 @@ impl LlmProvider for ResponsesProvider {
             let text = resp.text().await.unwrap_or_default();
             return Err(map_api_error(status.as_u16(), &text, &self.api_key));
         }
-        Ok(Box::pin(parse_responses_sse(resp.bytes_stream())))
+        Ok(Box::pin(parse_responses_sse(
+            resp.bytes_stream(),
+            self.deepseek_automatic_cache,
+        )))
     }
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             supports_streaming: true,
             supports_tool_use: true,
-            supports_vision: true,
-            supports_prompt_caching: false,
+            supports_vision: self.supports_vision,
+            supports_prompt_caching: self.deepseek_automatic_cache,
             max_context_tokens: self.max_context_tokens,
         }
     }
 
     fn name(&self) -> &str {
-        "openai_responses"
+        self.provider_name
     }
 }
 
@@ -543,6 +563,14 @@ pub fn parse_responses_response(
     value: &Value,
     reasoning: ReasoningMode,
 ) -> Result<CompletionResponse> {
+    parse_responses_response_with_cache(value, reasoning, false)
+}
+
+fn parse_responses_response_with_cache(
+    value: &Value,
+    reasoning: ReasoningMode,
+    deepseek_automatic_cache: bool,
+) -> Result<CompletionResponse> {
     let output = value
         .get("output")
         .and_then(|v| v.as_array())
@@ -603,7 +631,7 @@ pub fn parse_responses_response(
     Ok(CompletionResponse {
         content,
         stop_reason: response_stop_reason(value, saw_tool_call),
-        usage: parse_usage(value.get("usage")),
+        usage: parse_usage(value.get("usage"), deepseek_automatic_cache),
     })
 }
 
@@ -662,24 +690,39 @@ fn response_stop_reason(value: &Value, saw_tool_call: bool) -> StopReason {
     }
 }
 
-fn parse_usage(usage: Option<&Value>) -> Usage {
+fn parse_usage(usage: Option<&Value>, deepseek_automatic_cache: bool) -> Usage {
     let Some(usage) = usage else {
         return Usage::default();
     };
+    let input_tokens = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+    let cache_read_tokens = usage
+        .get("prompt_cache_hit_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            usage
+                .pointer("/input_tokens_details/cached_tokens")
+                .and_then(Value::as_u64)
+        })
+        .map(|tokens| tokens as u32);
+    let cache_write_tokens = usage
+        .get("prompt_cache_miss_tokens")
+        .and_then(Value::as_u64)
+        .map(|tokens| tokens as u32)
+        .or_else(|| {
+            (deepseek_automatic_cache && cache_read_tokens.is_some())
+                .then(|| input_tokens.saturating_sub(cache_read_tokens.unwrap_or(0)))
+        });
     Usage {
-        input_tokens: usage
-            .get("input_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32,
+        input_tokens,
         output_tokens: usage
             .get("output_tokens")
-            .and_then(|v| v.as_u64())
+            .and_then(Value::as_u64)
             .unwrap_or(0) as u32,
-        cache_read_tokens: usage
-            .pointer("/input_tokens_details/cached_tokens")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32),
-        cache_write_tokens: None,
+        cache_read_tokens,
+        cache_write_tokens,
     }
 }
 
@@ -699,14 +742,19 @@ struct StreamState {
     last_sequence: Option<u64>,
     saw_tool_call: bool,
     stopped: bool,
+    deepseek_automatic_cache: bool,
 }
 
 fn parse_responses_sse(
     byte_stream: impl futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>,
+    deepseek_automatic_cache: bool,
 ) -> impl futures::Stream<Item = StreamEvent> {
     use futures::StreamExt;
     let mut buffer = String::new();
-    let mut state = StreamState::default();
+    let mut state = StreamState {
+        deepseek_automatic_cache,
+        ..StreamState::default()
+    };
 
     byte_stream
         .map(move |chunk| {
@@ -850,7 +898,10 @@ fn parse_one_responses_event(data: &str, state: &mut StreamState) -> Vec<StreamE
             if let Some(response) = value.get("response") {
                 // 少数实现不发 output_item.done，只在终帧给出完整 output
                 events.extend(drain_final_output(response, state));
-                events.push(StreamEvent::Usage(parse_usage(response.get("usage"))));
+                events.push(StreamEvent::Usage(parse_usage(
+                    response.get("usage"),
+                    state.deepseek_automatic_cache,
+                )));
                 if !state.stopped {
                     state.stopped = true;
                     events.push(StreamEvent::Stop {
@@ -1029,6 +1080,10 @@ mod tests {
 
     #[test]
     fn responses_url_respects_custom_version_segment() {
+        assert_eq!(
+            provider("https://api.deepseek.com").responses_url(),
+            "https://api.deepseek.com/v1/responses"
+        );
         assert_eq!(
             provider("https://api.openai.com").responses_url(),
             "https://api.openai.com/v1/responses"
@@ -1338,6 +1393,44 @@ mod tests {
         assert_eq!(parsed.stop_reason, StopReason::ToolUse);
         assert_eq!(parsed.usage.input_tokens, 10);
         assert_eq!(parsed.usage.cache_read_tokens, Some(4));
+        assert_eq!(parsed.usage.cache_write_tokens, None);
+    }
+
+    #[test]
+    fn deepseek_responses_derives_cache_miss_tokens() {
+        let value = json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "done"}]
+            }],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 3,
+                "input_tokens_details": {"cached_tokens": 80}
+            }
+        });
+        let parsed =
+            parse_responses_response_with_cache(&value, ReasoningMode::Drop, true).unwrap();
+        assert_eq!(parsed.usage.cache_read_tokens, Some(80));
+        assert_eq!(parsed.usage.cache_write_tokens, Some(20));
+
+        let explicit = json!({
+            "status": "completed",
+            "output": [],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 0,
+                "prompt_cache_hit_tokens": 70,
+                "prompt_cache_miss_tokens": 30,
+                "input_tokens_details": {"cached_tokens": 999}
+            }
+        });
+        let parsed =
+            parse_responses_response_with_cache(&explicit, ReasoningMode::Drop, true).unwrap();
+        assert_eq!(parsed.usage.cache_read_tokens, Some(70));
+        assert_eq!(parsed.usage.cache_write_tokens, Some(30));
     }
 
     #[test]
@@ -1632,6 +1725,16 @@ mod tests {
                 .max_context_tokens,
             400_000
         );
+
+        let deepseek = ResponsesProvider::new_deepseek(
+            "sk-test".into(),
+            "deepseek-v4-flash".into(),
+            "https://api.deepseek.com".into(),
+        );
+        assert_eq!(deepseek.name(), "deepseek_responses");
+        assert!(deepseek.capabilities().supports_prompt_caching);
+        assert_eq!(deepseek.capabilities().max_context_tokens, 1_000_000);
+        assert!(!deepseek.capabilities().supports_vision);
     }
 
     #[test]

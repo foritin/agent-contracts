@@ -12,11 +12,14 @@
 //! 预期：第 1 轮冷启动全 miss（hit=0）；第 2 轮起前缀命中，命中率随轮次增长
 //! 趋近 90%+（对照 docs/deepseek-cache-baseline.md 的 80.5% 第二轮基线）。
 
+use std::time::Duration;
+
 use futures::StreamExt;
 use hermes_core::{
     CompletionRequest, ContentBlock, LlmProvider, Message, Role, StopReason, StreamEvent, Usage,
 };
 use hermes_llm::deepseek::DeepSeekProvider;
+use hermes_llm::{create_provider, ProviderConfig};
 
 /// 模拟 P0-A 落地后的稳定 system（不含时间戳等动态内容，字节跨轮不变）。
 /// 长度约 250 tokens，明显超过 DeepSeek 缓存块粒度（~64 tokens）。
@@ -31,6 +34,8 @@ uncertainty when you are not sure. You prefer showing a minimal reproducible exa
 advice. You respond in the language the user uses.";
 
 const ROUNDS: usize = 14;
+const PROTOCOL_PROBE_ROUNDS: usize = 3;
+const PROTOCOL_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[tokio::test]
 #[ignore = "需要真实 DeepSeek API key（DEEPSEEK_API_KEY 环境变量）"]
@@ -114,4 +119,126 @@ async fn deepseek_prefix_cache_hit_curve() {
         tail_avg > 0.0,
         "真实 API 未观测到任何缓存命中——前缀可能不稳定"
     );
+}
+
+fn live_api_key() -> Option<String> {
+    match std::env::var("DEEPSEEK_API_KEY") {
+        Ok(api_key) if !api_key.trim().is_empty() => Some(api_key),
+        _ => {
+            eprintln!("[live-probe] DEEPSEEK_API_KEY 未设置，跳过真实 API 探针");
+            None
+        }
+    }
+}
+
+fn protocol_probe_request(model: &str) -> CompletionRequest {
+    CompletionRequest {
+        model: model.to_string(),
+        system: Some(STABLE_SYSTEM.to_string()),
+        messages: vec![Message::user_text(
+            "This is a transport and prefix-cache probe. Reply with exactly: cache-probe-ok",
+        )],
+        tools: vec![],
+        hosted_tools: vec![],
+        max_tokens: 64,
+        temperature: None,
+        enable_caching: true,
+        inference: Default::default(),
+    }
+}
+
+fn merge_usage(aggregate: &mut Usage, update: Usage) {
+    if update.input_tokens > 0 {
+        aggregate.input_tokens = update.input_tokens;
+    }
+    if update.output_tokens > 0 {
+        aggregate.output_tokens = update.output_tokens;
+    }
+    if update.cache_read_tokens.is_some() {
+        aggregate.cache_read_tokens = update.cache_read_tokens;
+    }
+    if update.cache_write_tokens.is_some() {
+        aggregate.cache_write_tokens = update.cache_write_tokens;
+    }
+}
+
+async fn run_protocol_probe(label: &str, provider: &dyn LlmProvider, model: &str) {
+    let mut saw_cache_metrics = false;
+    let mut saw_cache_hit = false;
+
+    for round in 1..=PROTOCOL_PROBE_ROUNDS {
+        let request = protocol_probe_request(model);
+        let (reply, usage) = tokio::time::timeout(PROTOCOL_PROBE_TIMEOUT, async {
+            let mut stream = provider.stream(request).await?;
+            let mut reply = String::new();
+            let mut usage = Usage::default();
+            while let Some(event) = stream.next().await {
+                match event {
+                    StreamEvent::TextDelta { text } => reply.push_str(&text),
+                    StreamEvent::Usage(update) => merge_usage(&mut usage, update),
+                    _ => {}
+                }
+            }
+            hermes_error::Result::Ok((reply, usage))
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{label} 请求在 120 秒内未完成"))
+        .unwrap_or_else(|error| panic!("{label} 请求失败: {error}"));
+
+        assert!(!reply.trim().is_empty(), "{label} 返回了空响应");
+        saw_cache_metrics |=
+            usage.cache_read_tokens.is_some() && usage.cache_write_tokens.is_some();
+        saw_cache_hit |= usage.cache_read_tokens.unwrap_or(0) > 0;
+        eprintln!(
+            "[live-probe:{label}] round={round} input={} output={} cache_read={:?} cache_write={:?}",
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens
+        );
+    }
+
+    assert!(
+        saw_cache_metrics,
+        "{label} 未返回可解析的 cache read/write usage"
+    );
+    assert!(saw_cache_hit, "{label} 连续三次稳定前缀请求均未命中缓存");
+}
+
+#[tokio::test]
+#[ignore = "需要真实 DeepSeek API key（DEEPSEEK_API_KEY 环境变量）"]
+async fn deepseek_responses_protocol_and_cache_live_probe() {
+    let Some(api_key) = live_api_key() else {
+        return;
+    };
+    let model = "deepseek-v4-flash";
+    let base_url = std::env::var("DEEPSEEK_RESPONSES_BASE_URL")
+        .unwrap_or_else(|_| "https://api.deepseek.com".to_string());
+    let provider = create_provider(ProviderConfig::DeepSeekResponses {
+        api_key,
+        model: model.to_string(),
+        base_url,
+    })
+    .expect("必须能构造 DeepSeek Responses provider");
+
+    run_protocol_probe("responses", provider.as_ref(), model).await;
+}
+
+#[tokio::test]
+#[ignore = "需要真实 DeepSeek API key（DEEPSEEK_API_KEY 环境变量）"]
+async fn deepseek_anthropic_protocol_and_cache_live_probe() {
+    let Some(api_key) = live_api_key() else {
+        return;
+    };
+    let model = "deepseek-v4-pro";
+    let base_url = std::env::var("DEEPSEEK_ANTHROPIC_BASE_URL")
+        .unwrap_or_else(|_| "https://api.deepseek.com/anthropic".to_string());
+    let provider = create_provider(ProviderConfig::DeepSeekAnthropic {
+        api_key,
+        model: model.to_string(),
+        base_url: Some(base_url),
+    })
+    .expect("必须能构造 DeepSeek Anthropic provider");
+
+    run_protocol_probe("anthropic", provider.as_ref(), model).await;
 }

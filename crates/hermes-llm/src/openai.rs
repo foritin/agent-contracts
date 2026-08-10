@@ -61,6 +61,8 @@ pub struct OpenAiProvider {
     /// 配置的默认模型（请求可覆盖）。
     #[allow(dead_code)]
     model: String,
+    /// DeepSeek 自定义网关仍需显式请求流式 usage；不能只靠官方域名判断。
+    force_stream_usage: bool,
 }
 
 impl OpenAiProvider {
@@ -70,7 +72,15 @@ impl OpenAiProvider {
             api_key,
             base_url,
             model,
+            force_stream_usage: false,
         }
+    }
+
+    /// 强制请求流末尾的 usage 帧。仅供明确保留了 DeepSeek 身份的包装层使用；
+    /// 普通 OpenAI 兼容网关仍维持按已知官方域名启用的保守行为。
+    pub(crate) fn with_stream_usage(mut self) -> Self {
+        self.force_stream_usage = true;
+        self
     }
 
     fn completions_url(&self) -> String {
@@ -87,15 +97,16 @@ impl OpenAiProvider {
     /// `stream_options.include_usage` 则真实流式会话收不到 usage 帧
     /// （docs/deepseek-prefix-cache.md §3 A14，P0-B 前置）。
     fn supports_stream_usage(&self) -> bool {
-        reqwest::Url::parse(self.base_url.trim())
-            .ok()
-            .and_then(|url| {
-                url.host_str().map(|host| {
-                    host.eq_ignore_ascii_case("api.openai.com")
-                        || host.eq_ignore_ascii_case("api.deepseek.com")
+        self.force_stream_usage
+            || reqwest::Url::parse(self.base_url.trim())
+                .ok()
+                .and_then(|url| {
+                    url.host_str().map(|host| {
+                        host.eq_ignore_ascii_case("api.openai.com")
+                            || host.eq_ignore_ascii_case("api.deepseek.com")
+                    })
                 })
-            })
-            .unwrap_or(false)
+                .unwrap_or(false)
     }
 
     fn build_body(&self, request: &CompletionRequest, stream: bool) -> Value {
@@ -254,9 +265,27 @@ impl LlmProvider for OpenAiProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<futures::stream::BoxStream<'static, StreamEvent>> {
-        let body = self.build_body(&request, true);
-        let resp =
-            send_with_retry(&self.client, &self.completions_url(), &self.api_key, &body).await?;
+        let mut body = self.build_body(&request, true);
+        let resp = match send_with_retry(
+            &self.client,
+            &self.completions_url(),
+            &self.api_key,
+            &body,
+        )
+        .await
+        {
+            Ok(resp) => resp,
+            Err(error) if self.force_stream_usage && stream_options_rejected(&error) => {
+                // 某些旧代理实现了 DeepSeek Chat/SSE，却拒绝 OpenAI 的 stream_options。
+                // 首次请求在参数校验阶段失败，移除该扩展后兼容重试；此时只能放弃
+                // 本轮 usage 观测，正文生成仍可继续。
+                body.as_object_mut()
+                    .expect("OpenAI request body must be an object")
+                    .remove("stream_options");
+                send_with_retry(&self.client, &self.completions_url(), &self.api_key, &body).await?
+            }
+            Err(error) => return Err(error),
+        };
         // 流空闲 watchdog：SSE 流超过 DEFAULT_STREAM_IDLE_TIMEOUT 无新字节即
         // 视为流死（半开 TCP），主动关闭连接并以可恢复错误终止（P1-E）。
         Ok(Box::pin(parse_openai_sse_with_idle_timeout(
@@ -278,6 +307,19 @@ impl LlmProvider for OpenAiProvider {
     fn name(&self) -> &str {
         "openai"
     }
+}
+
+fn stream_options_rejected(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::ApiError { status: 400 | 422, message }
+            if {
+                let message = message.to_ascii_lowercase();
+                message.contains("stream_options")
+                    || message.contains("stream options")
+                    || message.contains("include_usage")
+            }
+    )
 }
 
 // ── 连接层重试（docs/deepseek-prefix-cache.md §5 P1-E）──────────────────
@@ -1276,6 +1318,11 @@ mod tests {
             "test-model".into(),
             "https://api.example.com/v1/".into(),
         );
+        let deepseek = OpenAiProvider::new(
+            "sk-test".into(),
+            "deepseek-v4-pro".into(),
+            "https://api.deepseek.com".into(),
+        );
 
         assert_eq!(
             from_root.completions_url(),
@@ -1284,6 +1331,10 @@ mod tests {
         assert_eq!(
             from_v1.completions_url(),
             "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            deepseek.completions_url(),
+            "https://api.deepseek.com/v1/chat/completions"
         );
     }
 
@@ -1440,10 +1491,17 @@ mod tests {
             "model".into(),
             "https://openrouter.ai/api/v1".into(),
         );
+        let deepseek_gateway = OpenAiProvider::new(
+            "key".into(),
+            "deepseek-v4-pro".into(),
+            "https://relay.internal.example/v1".into(),
+        )
+        .with_stream_usage();
 
         let official_body = official.build_body(&req, true);
         let deepseek_body = deepseek.build_body(&req, true);
         let compatible_body = compatible.build_body(&req, true);
+        let deepseek_gateway_body = deepseek_gateway.build_body(&req, true);
 
         assert_eq!(official_body["stream"], true);
         assert_eq!(official_body["stream_options"]["include_usage"], true);
@@ -1451,6 +1509,10 @@ mod tests {
         // （docs/deepseek-prefix-cache.md §3 A14，P0-B 前置）。
         assert_eq!(deepseek_body["stream"], true);
         assert_eq!(deepseek_body["stream_options"]["include_usage"], true);
+        assert_eq!(
+            deepseek_gateway_body["stream_options"]["include_usage"],
+            true
+        );
         assert_eq!(compatible_body["stream"], true);
         assert!(compatible_body.get("stream_options").is_none());
     }
