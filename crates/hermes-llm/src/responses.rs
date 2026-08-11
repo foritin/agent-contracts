@@ -738,6 +738,8 @@ struct StreamState {
     /// 已发出 HostedToolUse / HostedToolResult 的 Responses web-search item id。
     announced_hosted_searches: std::collections::HashSet<String>,
     completed_hosted_searches: std::collections::HashSet<String>,
+    /// Reasoning item ids that already emitted streamed deltas or a completed summary.
+    emitted_reasoning_items: std::collections::HashSet<String>,
     /// 上一个 `sequence_number`，用于断线重连后的去重。
     last_sequence: Option<u64>,
     saw_tool_call: bool,
@@ -816,6 +818,18 @@ fn parse_one_responses_event(data: &str, state: &mut StreamState) -> Vec<StreamE
     let mut events = Vec::new();
 
     match event_type {
+        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                if !delta.is_empty() {
+                    if let Some(item_id) = value.get("item_id").and_then(Value::as_str) {
+                        state.emitted_reasoning_items.insert(item_id.to_string());
+                    }
+                    events.push(StreamEvent::ReasoningDelta {
+                        text: delta.to_string(),
+                    });
+                }
+            }
+        }
         "response.output_text.delta" => {
             if let Some(delta) = value.get("delta").and_then(|v| v.as_str()) {
                 if !delta.is_empty() {
@@ -872,6 +886,7 @@ fn parse_one_responses_event(data: &str, state: &mut StreamState) -> Vec<StreamE
         "response.output_item.done" => {
             if let Some(item) = value.get("item") {
                 match item_type(item) {
+                    "reasoning" => emit_completed_reasoning_item(item, state, &mut events),
                     "function_call" => {
                         let call_id = item
                             .get("call_id")
@@ -943,6 +958,7 @@ fn drain_final_output(response: &Value, state: &mut StreamState) -> Vec<StreamEv
     let mut events = Vec::new();
     for item in output {
         match item_type(item) {
+            "reasoning" => emit_completed_reasoning_item(item, state, &mut events),
             "function_call" => {
                 let Some(call_id) = item.get("call_id").and_then(|v| v.as_str()) else {
                     continue;
@@ -972,6 +988,24 @@ fn drain_final_output(response: &Value, state: &mut StreamState) -> Vec<StreamEv
         }
     }
     events
+}
+
+fn emit_completed_reasoning_item(
+    item: &Value,
+    state: &mut StreamState,
+    events: &mut Vec<StreamEvent>,
+) {
+    let item_id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("__reasoning_without_id__");
+    if !state.emitted_reasoning_items.insert(item_id.to_string()) {
+        return;
+    }
+    let text = reasoning_summary_text(item);
+    if !text.is_empty() {
+        events.push(StreamEvent::ReasoningDelta { text });
+    }
 }
 
 fn responses_hosted_item_to_custom(item: &Value) -> Option<ContentBlock> {
@@ -1480,6 +1514,50 @@ mod tests {
             .collect();
         assert_eq!(text, "Hello");
         assert!(matches!(events.last(), Some(StreamEvent::Stop { .. })));
+    }
+
+    #[test]
+    fn reasoning_summary_stream_is_visible_once_and_separate_from_answer() {
+        let events = run_stream(&[
+            r#"{"type":"response.reasoning_summary_text.delta","sequence_number":1,"item_id":"rs_1","delta":"check "}"#,
+            r#"{"type":"response.reasoning_summary_text.delta","sequence_number":2,"item_id":"rs_1","delta":"facts"}"#,
+            r#"{"type":"response.output_item.done","sequence_number":3,
+                "item":{"type":"reasoning","id":"rs_1","summary":[{"text":"check facts"}]}}"#,
+            r#"{"type":"response.output_text.delta","sequence_number":4,"delta":"done"}"#,
+        ]);
+        let reasoning = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ReasoningDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(reasoning, "check facts");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, StreamEvent::ReasoningDelta { .. }))
+                .count(),
+            2,
+            "the completed item must not replay an already streamed summary"
+        );
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta { text } if text == "done")));
+    }
+
+    #[test]
+    fn completed_response_backfills_reasoning_when_deltas_are_absent() {
+        let events = run_stream(&[
+            r#"{"type":"response.completed","sequence_number":1,"response":{
+                "status":"completed","output":[
+                    {"type":"reasoning","id":"rs_1","summary":[{"text":"summary"}]},
+                    {"type":"message","content":[]}
+                ],"usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        ]);
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::ReasoningDelta { text } if text == "summary")
+        ));
     }
 
     #[test]
