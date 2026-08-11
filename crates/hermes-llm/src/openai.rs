@@ -1208,6 +1208,18 @@ fn parse_one_openai(
 
     if let Some(choice) = value.get("choices").and_then(|choices| choices.get(0)) {
         if let Some(delta) = choice.get("delta") {
+            // DeepSeek/Qwen compatible routes commonly use `reasoning_content`; OpenRouter and
+            // a few gateways normalize the same public stream as `reasoning`. Take the first
+            // populated field so a gateway that aliases both cannot duplicate the UI output.
+            if let Some(reasoning) = ["reasoning_content", "reasoning"]
+                .iter()
+                .find_map(|key| delta.get(*key).and_then(Value::as_str))
+                .filter(|text| !text.is_empty())
+            {
+                events.push(StreamEvent::ReasoningDelta {
+                    text: reasoning.to_string(),
+                });
+            }
             if let Some(content) = delta.get("content").and_then(|text| text.as_str()) {
                 if !content.is_empty() {
                     events.push(StreamEvent::TextDelta {
@@ -1777,6 +1789,22 @@ mod tests {
         let r = parse_openai_response(&v).unwrap();
         assert_eq!(r.text(), "hi");
         assert_eq!(r.usage.input_tokens, 2);
+    }
+
+    #[test]
+    fn stream_surfaces_provider_reasoning_separately_from_answer_text() {
+        let mut tool_args = std::collections::HashMap::new();
+        let events = parse_one_openai(
+            r#"{"choices":[{"delta":{"reasoning_content":"checking","content":"done"}}]}"#,
+            &mut tool_args,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [
+                StreamEvent::ReasoningDelta { text: reasoning },
+                StreamEvent::TextDelta { text: answer }
+            ] if reasoning == "checking" && answer == "done"
+        ));
     }
 
     #[test]

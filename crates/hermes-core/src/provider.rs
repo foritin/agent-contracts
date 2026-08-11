@@ -181,6 +181,12 @@ pub enum StreamEvent {
     TextDelta {
         text: String,
     },
+    /// Provider 明确返回、允许客户端展示的思考内容或推理摘要增量。
+    ///
+    /// 这里只承载可见文本；加密推理块、签名和其它 provider-private 载荷不得进入。
+    ReasoningDelta {
+        text: String,
+    },
     ToolUseStart {
         id: String,
         name: String,

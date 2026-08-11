@@ -882,6 +882,14 @@ fn parse_one_sse(raw: &str, state: &mut AnthropicStreamState) -> Option<StreamEv
                     is_error,
                     provider_content: Some(block.clone()),
                 })
+            } else if kind == "thinking" {
+                block
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                    .map(|text| StreamEvent::ReasoningDelta {
+                        text: text.to_string(),
+                    })
             } else {
                 None
             }
@@ -893,6 +901,10 @@ fn parse_one_sse(raw: &str, state: &mut AnthropicStreamState) -> Option<StreamEv
                 "text_delta" => {
                     let text = delta.get("text")?.as_str()?.to_string();
                     Some(StreamEvent::TextDelta { text })
+                }
+                "thinking_delta" => {
+                    let text = delta.get("thinking")?.as_str()?.to_string();
+                    (!text.is_empty()).then_some(StreamEvent::ReasoningDelta { text })
                 }
                 "input_json_delta" => {
                     let index = v.get("index").and_then(Value::as_u64).unwrap_or(0);
@@ -1290,7 +1302,10 @@ mod tests {
             "data:{\"type\":\"content_block_delta\",\"index\":0,",
             "\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"checking\"}}\n\n"
         );
-        assert!(parse_one_sse(thinking_delta, &mut state).is_none());
+        assert!(matches!(
+            parse_one_sse(thinking_delta, &mut state),
+            Some(StreamEvent::ReasoningDelta { text }) if text == "checking"
+        ));
 
         let text_delta = concat!(
             "event:content_block_delta\n",

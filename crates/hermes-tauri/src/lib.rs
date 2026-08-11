@@ -129,6 +129,7 @@ mod tests {
                         temperature: None,
                         protocol: None,
                         provider_kind: None,
+                        show_reasoning: true,
                     },
                 );
                 m

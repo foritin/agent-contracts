@@ -63,6 +63,20 @@ pub struct ProviderConfig {
     /// 自动选中 Responses。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
+    /// Whether provider-exposed reasoning summaries/content are shown in the conversation UI.
+    ///
+    /// This is a presentation preference only: it never enables or disables model reasoning.
+    /// Legacy configs default to visible so upgrading does not silently hide useful output.
+    #[serde(default = "default_show_reasoning", skip_serializing_if = "is_true")]
+    pub show_reasoning: bool,
+}
+
+fn default_show_reasoning() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl fmt::Debug for ProviderConfig {
@@ -75,6 +89,7 @@ impl fmt::Debug for ProviderConfig {
             .field("max_tokens", &self.max_tokens)
             .field("temperature", &self.temperature)
             .field("protocol", &self.protocol)
+            .field("show_reasoning", &self.show_reasoning)
             .finish()
     }
 }
@@ -495,6 +510,7 @@ memories_dir = "/tmp/h/m"
             temperature: None,
             protocol: None,
             provider_kind: None,
+            show_reasoning: true,
         };
         let dbg = format!("{:?}", config);
         assert!(!dbg.contains("sk-secret-12345"), "api_key leaked: {dbg}");
@@ -525,6 +541,33 @@ model = "deepseek-v4-pro"
         )
         .unwrap();
         assert_eq!(legacy.provider_kind, None);
+        assert!(
+            legacy.show_reasoning,
+            "legacy provider configs should show reasoning by default"
+        );
+        assert!(
+            !toml::to_string(&legacy).unwrap().contains("show_reasoning"),
+            "the default value should not add config noise"
+        );
+    }
+
+    #[test]
+    fn provider_reasoning_visibility_false_roundtrips() {
+        let hidden: ProviderConfig = toml::from_str(
+            r#"
+base_url = "https://api.example.com"
+api_key = "secret"
+model = "reasoning-model"
+show_reasoning = false
+"#,
+        )
+        .unwrap();
+        assert!(!hidden.show_reasoning);
+
+        let persisted = toml::to_string(&hidden).unwrap();
+        assert!(persisted.contains("show_reasoning = false"));
+        let reloaded: ProviderConfig = toml::from_str(&persisted).unwrap();
+        assert!(!reloaded.show_reasoning);
     }
 
     #[test]
@@ -541,6 +584,7 @@ model = "deepseek-v4-pro"
                 temperature: None,
                 protocol: None,
                 provider_kind: None,
+                show_reasoning: true,
             },
         );
         let r = config.validate();
@@ -561,6 +605,7 @@ model = "deepseek-v4-pro"
                 temperature: None,
                 protocol: None,
                 provider_kind: None,
+                show_reasoning: true,
             },
         );
         let r = config.validate();
