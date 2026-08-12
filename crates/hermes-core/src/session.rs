@@ -62,6 +62,13 @@ pub enum SessionEvent {
     HistorySnapshot {
         messages: Vec<Message>,
     },
+    /// 仅供模型请求使用的压缩投影；完整历史继续由 `HistorySnapshot` 保存。
+    ///
+    /// `None` 会清除既有投影，使后续请求重新使用 canonical transcript。该事件是
+    /// 向后兼容的增量格式：旧 JSONL 没有此行时等同于 `None`。
+    ModelProjection {
+        messages: Option<Vec<Message>>,
+    },
     System {
         event: String,
         data: Value,
@@ -82,7 +89,13 @@ pub enum SessionStatus {
 #[derive(Debug, Clone)]
 pub struct Session {
     pub meta: SessionMeta,
+    /// 完整、可恢复的协议历史。压缩不得改写此字段。
     pub messages: Vec<Message>,
+    /// 可选的模型可见投影。`None` 表示模型直接使用完整历史。
+    ///
+    /// 该字段只描述请求工作集，不参与 UI 时间线；摘要压缩可以替换投影，但必须
+    /// 保留 `messages` 作为 canonical transcript，避免长会话证据永久丢失。
+    pub model_projection: Option<Vec<Message>>,
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
     pub total_tool_calls: u32,
@@ -95,6 +108,7 @@ impl Session {
         Self {
             meta,
             messages: Vec::new(),
+            model_projection: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             total_tool_calls: 0,
@@ -182,6 +196,25 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(messages[0].content[0].is_tool_use());
         assert!(messages[1].content[0].is_tool_result());
+    }
+
+    #[test]
+    fn new_session_starts_without_a_model_projection() {
+        let session = Session::new(SessionMeta::new("m", "p"));
+        assert!(session.model_projection.is_none());
+    }
+
+    #[test]
+    fn model_projection_event_roundtrips_independently() {
+        let ev = SessionEvent::ModelProjection {
+            messages: Some(vec![Message::user_text("summary")]),
+        };
+        let encoded = serde_json::to_string(&ev).unwrap();
+        let decoded: SessionEvent = serde_json::from_str(&encoded).unwrap();
+        let SessionEvent::ModelProjection { messages } = decoded else {
+            panic!("wrong event variant");
+        };
+        assert_eq!(messages.unwrap()[0].text_content(), "summary");
     }
 
     #[test]

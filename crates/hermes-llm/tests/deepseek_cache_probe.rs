@@ -1,4 +1,4 @@
-//! DeepSeek 真实 API 前缀缓存探针（docs/deepseek-prefix-cache.md §6 真实 API 层级）。
+//! DeepSeek 真实 API 前缀缓存探针（https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §6 真实 API 层级）。
 //!
 //! 验证 P0-A 请求结构（稳定 system + append-only 历史）在真实 DeepSeek API 上的
 //! 缓存命中率曲线，并验证 P0-B 的 usage 解析链路（`stream_options.include_usage`
@@ -10,7 +10,7 @@
 //! ```
 //!
 //! 预期：第 1 轮冷启动全 miss（hit=0）；第 2 轮起前缀命中，命中率随轮次增长
-//! 趋近 90%+（对照 docs/deepseek-cache-baseline.md 的 80.5% 第二轮基线）。
+//! 趋近 90%+（对照 https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-cache-baseline.md 的 80.5% 第二轮基线）。
 
 use std::time::Duration;
 

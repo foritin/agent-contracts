@@ -18,7 +18,7 @@ use crate::url::openai_api_root;
 const MAX_ERROR_MESSAGE_CHARS: usize = 240;
 const MAX_ERROR_METADATA_CHARS: usize = 64;
 
-// ── 连接层重试（docs/deepseek-prefix-cache.md §5 P1-E）──────────────────
+// ── 连接层重试（https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5 P1-E）──────────
 //
 // 对齐 Reasonix `internal/provider/retry.go`：连接 + header 阶段失败时指数
 // 退避重试；body 流一旦开始就不重试（模型可能已产出 token）。重试复用同一
@@ -36,7 +36,7 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// 没有该 deadline 重试循环会在 io 读取上无限阻塞。
 const ERROR_BODY_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-// ── 流空闲 watchdog（docs/deepseek-prefix-cache.md §5 P1-E）──────────────
+// ── 流空闲 watchdog（https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5 P1-E）──────
 //
 // 对齐 Reasonix `openai.go:43-50`（defaultStreamIdleTimeout = 120s）：SSE 流
 // 超过该时长无任何新字节，视为半开 TCP 连接（代理切换、服务端静默），主动
@@ -46,7 +46,7 @@ const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// 流空闲超时终止时发出的 `StopReason::Other` 标记，agent 层据此走恢复路径。
 const STREAM_IDLE_TIMEOUT_REASON: &str = "stream_idle_timeout";
 
-// ── 悬空工具调用对的占位结果（docs/deepseek-prefix-cache.md §5 P1-F）────
+// ── 悬空工具调用对的占位结果（https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5 P1-F）
 //
 // 对齐 Reasonix `provider.go` 的 `interruptedToolResult`：assistant tool_calls
 // 必须有对应 tool 结果，否则 DeepSeek 直接 400
@@ -95,7 +95,7 @@ impl OpenAiProvider {
     /// DeepSeek 的自动前缀缓存字段（`prompt_cache_hit_tokens` /
     /// `prompt_cache_miss_tokens`）只在 usage 帧中出现，不带
     /// `stream_options.include_usage` 则真实流式会话收不到 usage 帧
-    /// （docs/deepseek-prefix-cache.md §3 A14，P0-B 前置）。
+    /// （https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §3 A14，P0-B 前置）。
     fn supports_stream_usage(&self) -> bool {
         self.force_stream_usage
             || reqwest::Url::parse(self.base_url.trim())
@@ -124,7 +124,7 @@ impl OpenAiProvider {
         // 发送前修复悬空工具调用对（Reasonix `SanitizeToolPairing`）：健康历史
         // 零拷贝透传（返回 None），只有存在未配对 tool_call / 孤儿 ToolResult
         // 时才构造修复副本。DeepSeek 对未配对的 assistant tool_calls 直接 400
-        // （docs/deepseek-prefix-cache.md §5 P1-F）。
+        // （https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5 P1-F）。
         let sanitized = sanitize_tool_pairing(&request.messages);
         match &sanitized {
             Some(msgs) => {
@@ -176,7 +176,7 @@ impl OpenAiProvider {
         if !tools.is_empty() {
             body["tools"] = json!(tools);
         }
-        // 键恒发（Reasonix `openai.go:688-735`，docs/deepseek-prefix-cache.md §5
+        // 键恒发（Reasonix `openai.go:688-735`，https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5
         // P1-F）：thinking 模式对 assistant tool_calls 轮恒发 `reasoning_content`
         // 键（空串可接受，缺键 DeepSeek 400 "must be passed back"）；tool 消息
         // 恒发 `name` 键（空值可接受，严格兼容口缺键 400）。
@@ -322,7 +322,7 @@ fn stream_options_rejected(error: &Error) -> bool {
     )
 }
 
-// ── 连接层重试（docs/deepseek-prefix-cache.md §5 P1-E）──────────────────
+// ── 连接层重试（https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5 P1-E）──────────
 
 /// 无 tokio 依赖的延时 future（crate 不依赖 tokio，futures 默认 features 也
 /// 不含 channel）：短暂线程 sleep 后通过共享 waker 槽唤醒等待方。
@@ -463,7 +463,7 @@ async fn send_with_retry(
 // ── 请求转换 ──────────────────────────────────────────────────
 
 /// 修复悬空工具调用对（Reasonix `SanitizeToolPairing` / `NormalizeMessages` 语义，
-/// docs/deepseek-prefix-cache.md §5 P1-F）。
+/// https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5 P1-F）。
 ///
 /// OpenAI 兼容 API（含 DeepSeek）要求每个 assistant `tool_calls` 都必须有对应
 /// 的 `role=tool` 结果消息，且不允许存在无主（孤儿）的 tool 结果。中断/恢复
@@ -563,7 +563,7 @@ fn sanitize_tool_pairing(messages: &[Message]) -> Option<Vec<Message>> {
     Some(out)
 }
 
-/// 键恒发（Reasonix `openai.go:688-735`，docs/deepseek-prefix-cache.md §5 P1-F）：
+/// 键恒发（Reasonix `openai.go:688-735`，https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5 P1-F）：
 /// - thinking 模式（DeepSeek）对 assistant `tool_calls` 轮恒发 `reasoning_content`
 ///   键：空串可接受，缺键 DeepSeek 400 "must be passed back"；thinking 关闭时
 ///   保持历史字节原样（该轮没有 reasoning 可回传，多发的键反而改变前缀）。
@@ -837,11 +837,11 @@ fn parse_openai_response(v: &Value) -> Result<CompletionResponse> {
 
 /// 从 usage 对象解析缓存 token 数。DeepSeek 字段优先（真实 DeepSeek 响应同时
 /// 回传两套字段，优先 DeepSeek 字段避免双计数或错值，见
-/// docs/deepseek-cache-baseline.md）：`prompt_cache_hit_tokens` →
+/// https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-cache-baseline.md）：`prompt_cache_hit_tokens` →
 /// cache_read_tokens，缺失时回落 OpenAI 官方风格
 /// `prompt_tokens_details.cached_tokens`；`prompt_cache_miss_tokens` →
 /// cache_write_tokens。字段都缺时回退 Some(0)，与"服务端未返回 usage"（整体
-/// 无 usage 键）区分开（docs/deepseek-prefix-cache.md §8）。
+/// 无 usage 键）区分开（https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §8）。
 fn parse_cache_tokens(usage: &Value) -> (Option<u32>, Option<u32>) {
     let cache_read = usage
         .get("prompt_cache_hit_tokens")
@@ -1075,7 +1075,7 @@ fn parse_openai_sse(
                 Err(SseChunkError::IdleTimeout) => {
                     // 流空闲 watchdog 触发：连接已关闭，流以可恢复错误终止。
                     // 与连接断开（Transport）区分：agent 层据此用同一冻结
-                    // 请求重放（docs/deepseek-prefix-cache.md §5 P1-E）。
+                    // 请求重放（https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5 P1-E）。
                     if !stopped {
                         stopped = true;
                         return vec![StreamEvent::Stop {
@@ -1130,7 +1130,7 @@ fn parse_openai_sse(
         .flat_map(futures::stream::iter)
 }
 
-/// 给 SSE 字节流加流空闲 watchdog（docs/deepseek-prefix-cache.md §5 P1-E，
+/// 给 SSE 字节流加流空闲 watchdog（https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5 P1-E，
 /// 对齐 Reasonix `readStream` 的 idle watchdog）。
 ///
 /// 机制（无 tokio 依赖，futures 默认 features 不含 channel）：
@@ -1272,7 +1272,7 @@ fn parse_one_openai(
 
     if let Some(usage) = value.get("usage") {
         // DeepSeek 在 usage 帧中回传自动前缀缓存的命中/未命中 token 数
-        // （docs/deepseek-prefix-cache.md §3 A6，P0-B）。字段缺失时回退
+        // （https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §3 A6，P0-B）。字段缺失时回退
         // Some(0)，与"服务端未返回 usage 帧"（整体无 usage 键，无 Usage
         // 事件）区分开：前者是已返回帧中的零命中，后者是服务端不支持。
         let (cache_read_tokens, cache_write_tokens) = parse_cache_tokens(usage);
@@ -1518,7 +1518,7 @@ mod tests {
         assert_eq!(official_body["stream"], true);
         assert_eq!(official_body["stream_options"]["include_usage"], true);
         // DeepSeek 前缀缓存字段只出现在 usage 帧中，必须请求 include_usage
-        // （docs/deepseek-prefix-cache.md §3 A14，P0-B 前置）。
+        // （https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §3 A14，P0-B 前置）。
         assert_eq!(deepseek_body["stream"], true);
         assert_eq!(deepseek_body["stream_options"]["include_usage"], true);
         assert_eq!(
@@ -1628,7 +1628,7 @@ mod tests {
 
     #[test]
     fn deepseek_cache_tokens_take_precedence_over_openai_details() {
-        // 真实 DeepSeek 响应同时回传两套字段（docs/deepseek-cache-baseline.md
+        // 真实 DeepSeek 响应同时回传两套字段（https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-cache-baseline.md
         // 第 19 行），DeepSeek 字段优先，避免双计数或错值。
         let response = parse_openai_response(&json!({
             "choices": [{
@@ -1852,7 +1852,7 @@ mod tests {
         assert_eq!(e.to_string(), "API error: 500 - request failed");
     }
 
-    // ── P1-F 键恒发（docs/deepseek-prefix-cache.md §5 P1-F）────────────
+    // ── P1-F 键恒发（https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5 P1-F）────
 
     fn assistant_tool_call_message(id: &str, name: &str) -> Message {
         Message {
@@ -1891,6 +1891,14 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    fn long_tool_evidence() -> String {
+        let mut evidence =
+            "path=src/核心.rs; command=cargo test; exit=0; 证据=完整\n".repeat(4_096);
+        evidence.push_str("__TOOL_EVIDENCE_TAIL_CHAT__");
+        assert!(evidence.len() > 100_000);
+        evidence
     }
 
     #[test]
@@ -1978,7 +1986,7 @@ mod tests {
         assert!(msgs[1].get("name").is_some());
     }
 
-    // ── P1-F SanitizeToolPairing（docs/deepseek-prefix-cache.md §5 P1-F）─
+    // ── P1-F SanitizeToolPairing（https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5 P1-F）
 
     #[test]
     fn dangling_tool_call_gets_placeholder_result() {
@@ -2064,7 +2072,41 @@ mod tests {
         assert!(sanitize_tool_pairing(&messages).is_none());
     }
 
-    // ── P1-E 退避计算（docs/deepseek-prefix-cache.md §5 P1-E）──────────
+    #[test]
+    fn custom_deepseek_gateway_preserves_paired_long_tool_evidence_and_drops_only_orphans() {
+        let provider = OpenAiProvider::new(
+            "k".into(),
+            "deepseek-v4-pro".into(),
+            "https://gateway.example/deepseek/v1".into(),
+        )
+        .with_stream_usage();
+        let evidence = long_tool_evidence();
+        let request = tool_round_request(
+            "deepseek-v4-pro",
+            vec![
+                assistant_tool_call_message("call_read", "read_file"),
+                tool_result_message("call_read", &evidence),
+                tool_result_message("call_orphan", "must not reach the provider"),
+            ],
+        );
+
+        let body = provider.build_body(&request, true);
+        let messages = body["messages"].as_array().expect("chat messages");
+
+        assert_eq!(messages.len(), 2, "assistant call + its paired result");
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_read");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "call_read");
+        assert_eq!(messages[1]["name"], "read_file");
+        assert_eq!(messages[1]["content"].as_str(), Some(evidence.as_str()));
+        assert!(messages[1]["content"]
+            .as_str()
+            .is_some_and(|content| content.ends_with("__TOOL_EVIDENCE_TAIL_CHAT__")));
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert!(!body.to_string().contains("call_orphan"));
+    }
+
+    // ── P1-E 退避计算（https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5 P1-E）──
 
     #[test]
     fn backoff_delay_doubles_then_caps_and_honors_retry_after() {
@@ -2084,7 +2126,7 @@ mod tests {
         );
     }
 
-    // ── P1-E 流空闲 watchdog（docs/deepseek-prefix-cache.md §5 P1-E）────
+    // ── P1-E 流空闲 watchdog（https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5 P1-E）
 
     #[tokio::test]
     async fn idle_stream_timeout_terminates_with_recoverable_stop() {
@@ -2139,7 +2181,7 @@ mod tests {
         ));
     }
 
-    // ── P1-E 连接层重试（docs/deepseek-prefix-cache.md §5 P1-E）────────
+    // ── P1-E 连接层重试（https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5 P1-E）
 
     /// 读取一个 HTTP 请求（header + Content-Length body），返回 body 文本。
     async fn read_http_request_body(socket: &mut tokio::net::TcpStream) -> String {

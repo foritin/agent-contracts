@@ -1070,6 +1070,14 @@ mod tests {
         }
     }
 
+    fn long_tool_evidence() -> String {
+        let mut evidence =
+            "path=src/核心.rs; command=cargo test; exit=0; 证据=完整\n".repeat(4_096);
+        evidence.push_str("__TOOL_EVIDENCE_TAIL_ANTHROPIC__");
+        assert!(evidence.len() > 100_000);
+        evidence
+    }
+
     fn assert_credentials_absent(value: &str, credentials: &[&str]) {
         for credential in credentials {
             assert!(
@@ -1524,6 +1532,74 @@ mod tests {
         };
         let v = message_to_anthropic(&m);
         assert_eq!(v["content"][0]["is_error"], true);
+    }
+
+    #[test]
+    fn custom_deepseek_gateway_preserves_paired_long_tool_evidence() {
+        let provider = AnthropicProvider::new_deepseek(
+            "sk-test".into(),
+            "deepseek-v4-pro".into(),
+            Some("https://gateway.example/deepseek/anthropic".into()),
+        )
+        .expect("deepseek anthropic provider");
+        let evidence = long_tool_evidence();
+        let mut request = test_completion_request();
+        request.model = "deepseek-v4-pro".into();
+        request.messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "toolu_read".into(),
+                    name: "read_file".into(),
+                    input: json!({"path": "src/核心.rs"}),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "toolu_read".into(),
+                    content: evidence.clone(),
+                    is_error: false,
+                }],
+            },
+        ];
+
+        let body = provider.build_request_body(&request);
+        let messages = body["messages"].as_array().expect("anthropic messages");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[0]["content"][0]["id"], "toolu_read");
+        assert_eq!(messages[1]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[1]["content"][0]["tool_use_id"], "toolu_read");
+        assert_eq!(
+            messages[1]["content"][0]["content"].as_str(),
+            Some(evidence.as_str())
+        );
+        assert!(messages[1]["content"][0]["content"]
+            .as_str()
+            .is_some_and(|content| content.ends_with("__TOOL_EVIDENCE_TAIL_ANTHROPIC__")));
+        assert_eq!(provider.name(), "deepseek_anthropic");
+    }
+
+    #[test]
+    fn standalone_anthropic_tool_result_is_not_silently_clipped_or_deleted() {
+        // Anthropic 请求构造不会像 Chat/Responses 那样删除孤立结果；原子工具轮次
+        // 必须由上游保证。这里固定“Provider 不静默损失证据”的边界语义。
+        let evidence = long_tool_evidence();
+        let message = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_orphan".into(),
+                content: evidence.clone(),
+                is_error: true,
+            }],
+        };
+
+        let converted = message_to_anthropic(&message);
+        assert_eq!(converted["content"][0]["tool_use_id"], "toolu_orphan");
+        assert_eq!(converted["content"][0]["content"], evidence);
+        assert_eq!(converted["content"][0]["is_error"], true);
     }
 
     #[test]
