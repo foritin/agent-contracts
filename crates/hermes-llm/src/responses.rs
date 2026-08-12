@@ -1112,6 +1112,14 @@ mod tests {
         }
     }
 
+    fn long_tool_evidence() -> String {
+        let mut evidence =
+            "path=src/核心.rs; command=cargo test; exit=0; 证据=完整\n".repeat(4_096);
+        evidence.push_str("__TOOL_EVIDENCE_TAIL_RESPONSES__");
+        assert!(evidence.len() > 100_000);
+        evidence
+    }
+
     #[test]
     fn responses_url_respects_custom_version_segment() {
         assert_eq!(
@@ -1334,6 +1342,56 @@ mod tests {
         let sanitized = sanitize_input_items(items);
         assert_eq!(sanitized.len(), 2);
         assert!(sanitized.iter().all(|item| item["call_id"] != "call_ghost"));
+    }
+
+    #[test]
+    fn custom_deepseek_gateway_preserves_paired_long_tool_evidence_and_drops_only_orphans() {
+        let provider = ResponsesProvider::new_deepseek(
+            "sk-test".into(),
+            "deepseek-v4-pro".into(),
+            "https://gateway.example/deepseek/v1".into(),
+        );
+        let evidence = long_tool_evidence();
+        let assistant = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_read".into(),
+                name: "read_file".into(),
+                input: json!({"path": "src/核心.rs"}),
+            }],
+        };
+        let results = Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_read".into(),
+                    content: evidence.clone(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_orphan".into(),
+                    content: "must not reach the provider".into(),
+                    is_error: false,
+                },
+            ],
+        };
+        let mut completion = request(vec![assistant, results]);
+        completion.model = "deepseek-v4-pro".into();
+
+        let body = provider.build_body(&completion, false);
+        let input = body["input"].as_array().expect("responses input");
+
+        assert_eq!(input.len(), 2, "function call + its paired output");
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[0]["call_id"], "call_read");
+        assert_eq!(input[1]["type"], "function_call_output");
+        assert_eq!(input[1]["call_id"], "call_read");
+        assert_eq!(input[1]["output"].as_str(), Some(evidence.as_str()));
+        assert!(input[1]["output"]
+            .as_str()
+            .is_some_and(|output| output.ends_with("__TOOL_EVIDENCE_TAIL_RESPONSES__")));
+        assert!(!body.to_string().contains("call_orphan"));
+        assert_eq!(provider.name(), "deepseek_responses");
     }
 
     #[test]

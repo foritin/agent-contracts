@@ -4,7 +4,7 @@
 
 use hermes_core::{
     Capabilities, CompactionStrategy, CompletionRequest, CompletionResponse, LlmProvider, Message,
-    Session, StreamEvent,
+    Role, Session, StopReason, StreamEvent,
 };
 use hermes_error::{Error, Result};
 use std::sync::Arc;
@@ -100,6 +100,44 @@ impl LlmSummaryCompaction {
     }
 }
 
+fn summary_source(messages: &[Message]) -> Result<String> {
+    let mut source = String::new();
+    for message in messages {
+        let role = match message.role {
+            Role::User => "USER",
+            Role::Assistant => "ASSISTANT",
+        };
+        source.push_str(role);
+        source.push_str(":\n");
+        for block in &message.content {
+            let serialized = serde_json::to_string(block).map_err(Error::Json)?;
+            source.push_str(&serialized);
+            source.push('\n');
+        }
+        source.push('\n');
+    }
+    Ok(source)
+}
+
+fn atomic_summary_split(messages: &[Message]) -> usize {
+    let mut split = messages.len() / 2;
+    if split == 0 || split >= messages.len() {
+        return split;
+    }
+    let left_has_tool_use = messages[split - 1]
+        .content
+        .iter()
+        .any(|block| block.is_tool_use());
+    let right_has_tool_result = messages[split]
+        .content
+        .iter()
+        .any(|block| block.is_tool_result());
+    if left_has_tool_use && right_has_tool_result {
+        split += 1;
+    }
+    split
+}
+
 #[async_trait::async_trait]
 impl CompactionStrategy for LlmSummaryCompaction {
     fn should_compact(&self, session: &Session, _max_tokens: u32) -> bool {
@@ -107,18 +145,17 @@ impl CompactionStrategy for LlmSummaryCompaction {
     }
 
     async fn compact(&self, session: &Session) -> Result<Vec<Message>> {
-        let split = session.messages.len() / 2;
+        let split = atomic_summary_split(&session.messages);
         if split == 0 {
             return Ok(session.messages.clone());
         }
         let to_compact = &session.messages[..split];
         let summary_prompt = format!(
-            "Summarize the following conversation concisely:\n\n{}",
-            to_compact
-                .iter()
-                .map(|m| m.text_content())
-                .collect::<Vec<_>>()
-                .join("\n")
+            "Create a precise continuation checkpoint from the conversation below. Preserve user \
+goals and constraints, decisions, tool names and important inputs, complete tool-result evidence, \
+file paths and symbols, commands and exit status, edits, verification results, errors and root \
+causes, and unfinished work. Do not invent facts. Return only the checkpoint.\n\n{}",
+            summary_source(to_compact)?
         );
 
         let response = self
@@ -129,14 +166,22 @@ impl CompactionStrategy for LlmSummaryCompaction {
                 messages: vec![Message::user_text(summary_prompt)],
                 tools: vec![],
                 hosted_tools: vec![],
-                max_tokens: 2048,
+                max_tokens: 4096,
                 temperature: Some(0.3),
                 enable_caching: false,
                 inference: Default::default(),
             })
             .await?;
 
+        if response.stop_reason == StopReason::MaxTokens {
+            return Err(Error::Compaction(
+                "summary reached the output limit and was not installed".into(),
+            ));
+        }
         let summary_text = response.text();
+        if summary_text.trim().is_empty() {
+            return Err(Error::Compaction("summary was empty".into()));
+        }
         let mut result = vec![Message::system_text(format!(
             "[compaction: llm_summary of messages 0..{split}: {summary_text}]",
         ))];
@@ -221,16 +266,21 @@ mod tests {
     /// 测试用 DummyProvider，返回固定摘要文本。
     struct DummyProvider {
         text: String,
+        stop_reason: StopReason,
+        requests: Option<Arc<std::sync::Mutex<Vec<CompletionRequest>>>>,
     }
 
     #[async_trait]
     impl LlmProvider for DummyProvider {
-        async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse> {
+        async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+            if let Some(requests) = &self.requests {
+                requests.lock().unwrap().push(request);
+            }
             Ok(CompletionResponse {
                 content: vec![ContentBlock::Text {
                     text: self.text.clone(),
                 }],
-                stop_reason: StopReason::EndTurn,
+                stop_reason: self.stop_reason.clone(),
                 usage: Usage::default(),
             })
         }
@@ -293,6 +343,8 @@ mod tests {
         session.messages[0] = Message::user_text("important goal");
         let provider = Arc::new(DummyProvider {
             text: "SUMMARY".into(),
+            stop_reason: StopReason::EndTurn,
+            requests: None,
         });
         let s = LlmSummaryCompaction::new(provider);
         let result = s.compact(&session).await.unwrap();
@@ -300,6 +352,83 @@ mod tests {
         assert!(result[0].text_content().contains("SUMMARY"));
         // 后半段保留
         assert!(result.len() < session.messages.len());
+    }
+
+    #[tokio::test]
+    async fn llm_summary_source_contains_tool_calls_and_results() {
+        let mut session = make_session(24);
+        session.messages[2] = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call-1".into(),
+                name: "read_file".into(),
+                input: serde_json::json!({"path": "src/main.rs"}),
+            }],
+        };
+        session.messages[3] = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call-1".into(),
+                content: "evidence-tail-保留".into(),
+                is_error: false,
+            }],
+        };
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(DummyProvider {
+            text: "SUMMARY".into(),
+            stop_reason: StopReason::EndTurn,
+            requests: Some(requests.clone()),
+        });
+
+        LlmSummaryCompaction::new(provider)
+            .compact(&session)
+            .await
+            .unwrap();
+
+        let prompt = requests.lock().unwrap()[0].messages[0].text_content();
+        assert!(prompt.contains("read_file"));
+        assert!(prompt.contains("src/main.rs"));
+        assert!(prompt.contains("evidence-tail-保留"));
+    }
+
+    #[tokio::test]
+    async fn llm_summary_rejects_max_tokens_response() {
+        let session = make_session(30);
+        let provider = Arc::new(DummyProvider {
+            text: "TRUNCATED".into(),
+            stop_reason: StopReason::MaxTokens,
+            requests: None,
+        });
+        let error = LlmSummaryCompaction::new(provider)
+            .compact(&session)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("output limit"));
+    }
+
+    #[test]
+    fn summary_split_never_separates_tool_use_from_its_result_message() {
+        let messages = vec![
+            Message::user_text("goal"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                    input: serde_json::json!({"path": "src/lib.rs"}),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call-1".into(),
+                    content: "evidence".into(),
+                    is_error: false,
+                }],
+            },
+            Message::assistant_text("done"),
+        ];
+        assert_eq!(atomic_summary_split(&messages), 3);
     }
 
     #[tokio::test]
@@ -325,7 +454,11 @@ mod tests {
             session.push_user(format!("recent {i}")); // 最近消息
         }
 
-        let provider = Arc::new(DummyProvider { text: "x".into() });
+        let provider = Arc::new(DummyProvider {
+            text: "x".into(),
+            stop_reason: StopReason::EndTurn,
+            requests: None,
+        });
         let s = SmartCompaction::new(provider);
         let result = s.compact(&session).await.unwrap();
 
@@ -377,7 +510,11 @@ mod tests {
         // LLM 摘要策略记录来源
         let mut session2 = make_session(30);
         session2.messages[0] = Message::user_text("goal");
-        let provider = Arc::new(DummyProvider { text: "S".into() });
+        let provider = Arc::new(DummyProvider {
+            text: "S".into(),
+            stop_reason: StopReason::EndTurn,
+            requests: None,
+        });
         let s2 = LlmSummaryCompaction::new(provider);
         let result2 = s2.compact(&session2).await.unwrap();
         let audit2 = result2[0].text_content();

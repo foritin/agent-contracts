@@ -204,17 +204,31 @@ impl SessionStore {
         let mut materialized_operations = std::collections::HashSet::new();
         let mut meta: Option<SessionMeta> = None;
         let mut messages: Vec<Message> = Vec::new();
+        let mut model_projection: Option<Vec<Message>> = None;
         let mut usage = Usage::default();
         let mut tool_calls = 0u32;
 
         for event in events {
             match event {
                 SessionEvent::Meta(m) => meta = Some(m),
-                SessionEvent::Message(msg) => messages.push(msg),
+                SessionEvent::Message(msg) => {
+                    messages.push(msg.clone());
+                    if let Some(projection) = model_projection.as_mut() {
+                        projection.push(msg);
+                    }
+                }
                 // 快照包含运行时的完整 Message 工作集（包括 ToolUse / ToolResult）。
                 // 后续新追加的 Message 仍需保留，因此替换的是此前已重建的前缀而非
                 // 直接 return。
-                SessionEvent::HistorySnapshot { messages: snapshot } => messages = snapshot,
+                SessionEvent::HistorySnapshot { messages: snapshot } => {
+                    messages = snapshot;
+                    // 快照属于一个更新的 canonical revision；紧随其后的显式
+                    // ModelProjection 会恢复对应投影。旧投影不可跨 revision 复用。
+                    model_projection = None;
+                }
+                SessionEvent::ModelProjection {
+                    messages: projection,
+                } => model_projection = projection,
                 SessionEvent::Usage(u) => usage += u,
                 SessionEvent::ToolCall { .. } | SessionEvent::ToolResult { .. } => tool_calls += 1,
                 SessionEvent::System { event, data } => {
@@ -225,11 +239,13 @@ impl SessionStore {
                             !cancelled_operations.contains(operation_id)
                                 && materialized_operations.insert(operation_id.to_string())
                         }) {
-                            if let Some(message) = data
-                                .get("message")
-                                .and_then(|value| serde_json::from_value(value.clone()).ok())
-                            {
-                                messages.push(message);
+                            if let Some(message) = data.get("message").and_then(|value| {
+                                serde_json::from_value::<Message>(value.clone()).ok()
+                            }) {
+                                messages.push(message.clone());
+                                if let Some(projection) = model_projection.as_mut() {
+                                    projection.push(message);
+                                }
                             }
                         }
                     }
@@ -240,6 +256,7 @@ impl SessionStore {
         let meta = meta.ok_or_else(|| Error::InvalidSession("missing meta line".into()))?;
         let mut session = Session::new(meta);
         session.messages = messages;
+        session.model_projection = model_projection;
         session.total_input_tokens = usage.input_tokens;
         session.total_output_tokens = usage.output_tokens;
         session.total_tool_calls = tool_calls;
@@ -461,6 +478,82 @@ mod tests {
         assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.messages[0].text_content(), "persisted answer");
         assert_eq!(loaded.messages[1].text_content(), "next question");
+    }
+
+    #[tokio::test]
+    async fn model_projection_does_not_replace_canonical_history() {
+        let (_d, store) = setup().await;
+        let session = store.create("model", "provider").await.unwrap();
+        let id = &session.meta.id;
+
+        store
+            .append(id, SessionEvent::Message(Message::user_text("evidence")))
+            .await
+            .unwrap();
+        store
+            .append(
+                id,
+                SessionEvent::ModelProjection {
+                    messages: Some(vec![Message::user_text("summary")]),
+                },
+            )
+            .await
+            .unwrap();
+
+        let loaded = store.load(id).await.unwrap();
+        assert_eq!(loaded.messages[0].text_content(), "evidence");
+        assert_eq!(
+            loaded.model_projection.unwrap()[0].text_content(),
+            "summary"
+        );
+    }
+
+    #[tokio::test]
+    async fn later_none_projection_event_clears_an_old_projection() {
+        let (_d, store) = setup().await;
+        let session = store.create("model", "provider").await.unwrap();
+        let id = &session.meta.id;
+        store
+            .append(
+                id,
+                SessionEvent::ModelProjection {
+                    messages: Some(vec![Message::user_text("old summary")]),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .append(id, SessionEvent::ModelProjection { messages: None })
+            .await
+            .unwrap();
+
+        assert!(store.load(id).await.unwrap().model_projection.is_none());
+    }
+
+    #[tokio::test]
+    async fn messages_appended_after_projection_are_visible_in_both_views() {
+        let (_d, store) = setup().await;
+        let session = store.create("model", "provider").await.unwrap();
+        let id = &session.meta.id;
+        store
+            .append(
+                id,
+                SessionEvent::ModelProjection {
+                    messages: Some(vec![Message::user_text("summary")]),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .append(id, SessionEvent::Message(Message::user_text("new turn")))
+            .await
+            .unwrap();
+
+        let loaded = store.load(id).await.unwrap();
+        assert_eq!(loaded.messages[0].text_content(), "new turn");
+        let projection = loaded.model_projection.unwrap();
+        assert_eq!(projection[0].text_content(), "summary");
+        assert_eq!(projection[1].text_content(), "new turn");
     }
 
     #[tokio::test]
