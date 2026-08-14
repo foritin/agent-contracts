@@ -105,7 +105,18 @@ impl AnthropicProvider {
         if let Some(temp) = request.temperature {
             body["temperature"] = json!(temp);
         }
+        let is_deepseek_v4 = self.deepseek_automatic_cache
+            && request.model.to_ascii_lowercase().contains("deepseek-v4");
         if let Some(thinking) = request.inference.thinking.as_deref() {
+            // `adaptive` is an R-Code-side governor marker for DeepSeek.  DeepSeek's Anthropic
+            // compatibility endpoint accepts enabled/disabled, whereas Anthropic itself uses
+            // adaptive thinking.  Translate only for providers constructed with DeepSeek
+            // identity so Claude and other compatible endpoints retain their native semantics.
+            let thinking = if is_deepseek_v4 && thinking == "adaptive" {
+                "enabled"
+            } else {
+                thinking
+            };
             body["thinking"] = json!({ "type": thinking });
         } else if request.inference.reasoning_effort.is_some()
             && request.model.to_ascii_lowercase().contains("claude")
@@ -113,7 +124,21 @@ impl AnthropicProvider {
             // Claude 4.6+ / 5 的 effort 必须与 adaptive thinking 一起使用。
             body["thinking"] = json!({ "type": "adaptive" });
         }
-        if let Some(effort) = request.inference.reasoning_effort.as_deref() {
+        let effort = if is_deepseek_v4 {
+            match request.inference.thinking.as_deref() {
+                // The off switch wins over a stale effort saved by an earlier UI selection.
+                Some("disabled") => None,
+                Some("enabled" | "adaptive") => request
+                    .inference
+                    .reasoning_effort
+                    .as_deref()
+                    .or(Some("high")),
+                _ => request.inference.reasoning_effort.as_deref(),
+            }
+        } else {
+            request.inference.reasoning_effort.as_deref()
+        };
+        if let Some(effort) = effort {
             body["output_config"] = json!({ "effort": effort });
         }
         let mut tools = request
@@ -1229,6 +1254,62 @@ mod tests {
         let body = provider.build_request_body(&request);
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn deepseek_anthropic_maps_local_adaptive_marker_to_native_enabled() {
+        let provider = AnthropicProvider::new_deepseek(
+            "sk-test".into(),
+            "deepseek-v4-pro".into(),
+            Some("https://api.deepseek.com/anthropic".into()),
+        )
+        .unwrap();
+        let mut request = test_completion_request();
+        request.model = "deepseek-v4-pro".into();
+        request.inference.thinking = Some("adaptive".into());
+
+        let body = provider.build_request_body(&request);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["output_config"]["effort"], "high");
+        assert!(!body.to_string().contains("adaptive"));
+    }
+
+    #[test]
+    fn deepseek_anthropic_preserves_explicit_disabled_high_and_max_modes() {
+        let provider = AnthropicProvider::new_deepseek(
+            "sk-test".into(),
+            "deepseek-v4-pro".into(),
+            Some("https://api.deepseek.com/anthropic".into()),
+        )
+        .unwrap();
+        let mut request = test_completion_request();
+        request.model = "deepseek-v4-pro".into();
+
+        request.inference.thinking = Some("disabled".into());
+        request.inference.reasoning_effort = Some("max".into());
+        let disabled = provider.build_request_body(&request);
+        assert_eq!(disabled["thinking"]["type"], "disabled");
+        assert!(disabled.get("output_config").is_none());
+
+        request.inference.thinking = Some("enabled".into());
+        for effort in ["high", "max"] {
+            request.inference.reasoning_effort = Some(effort.into());
+            let body = provider.build_request_body(&request);
+            assert_eq!(body["thinking"]["type"], "enabled");
+            assert_eq!(body["output_config"]["effort"], effort);
+        }
+    }
+
+    #[test]
+    fn anthropic_keeps_native_adaptive_thinking() {
+        let provider =
+            AnthropicProvider::new("sk-ant-test".into(), "claude-opus-4-6".into(), None).unwrap();
+        let mut request = test_completion_request();
+        request.model = "claude-opus-4-6".into();
+        request.inference.thinking = Some("adaptive".into());
+
+        let body = provider.build_request_body(&request);
+        assert_eq!(body["thinking"]["type"], "adaptive");
     }
 
     #[test]

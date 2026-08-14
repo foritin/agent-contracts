@@ -27,8 +27,12 @@ use hermes_core::{
 use hermes_error::{Error, Result};
 use serde_json::{json, Value};
 
-use crate::openai::{map_api_error, sanitize_transport_error};
+use crate::openai::{map_api_error, normalize_api_error, sanitize_transport_error};
 use crate::url::openai_api_root;
+
+/// DeepSeek's stateless Responses endpoint accepts completed provider search items on replay.
+/// Keep a single malformed or unexpectedly large server item from poisoning every later turn.
+const MAX_REPLAYABLE_HOSTED_WEB_ITEM_BYTES: usize = 512 * 1024;
 
 /// 推理内容的处理策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -123,7 +127,27 @@ impl ResponsesProvider {
         if let Some(temp) = request.temperature {
             body["temperature"] = json!(temp);
         }
-        if let Some(effort) = request.inference.reasoning_effort.as_deref() {
+        // Responses has no `thinking` field.  For DeepSeek only, translate R-Code's local
+        // thinking selection into the vendor's native reasoning effort: disabled means no
+        // reasoning, while enabled/adaptive starts at high unless the user/governor supplied an
+        // explicit effort.  Never send the local `adaptive` marker over the wire.  Non-DeepSeek
+        // providers retain the pre-existing behavior of considering `reasoning_effort` only.
+        let is_deepseek_v4 = self.deepseek_automatic_cache
+            && request.model.to_ascii_lowercase().contains("deepseek-v4");
+        let effort = if is_deepseek_v4 {
+            match request.inference.thinking.as_deref() {
+                Some("disabled") => Some("none"),
+                Some("enabled" | "adaptive") => request
+                    .inference
+                    .reasoning_effort
+                    .as_deref()
+                    .or(Some("high")),
+                _ => request.inference.reasoning_effort.as_deref(),
+            }
+        } else {
+            request.inference.reasoning_effort.as_deref()
+        };
+        if let Some(effort) = effort {
             body["reasoning"] = json!({ "effort": effort });
         }
         if let Some(verbosity) = request.inference.verbosity.as_deref() {
@@ -370,12 +394,13 @@ pub fn message_to_items(msg: &Message, reasoning: ReasoningMode) -> Vec<Value> {
                         if is_hosted_web_item_type(type_name) =>
                     {
                         // Responses hosted tools are output items, not function calls. DeepSeek's
-                        // stateless endpoint asks clients to replay the completed item as-is so it
-                        // can restore the provider-side search context on later turns.
-                        flush_assistant_text(&mut text_buffer, &mut items);
-                        let mut item = data.as_object().cloned().unwrap_or_default();
-                        item.insert("type".to_string(), Value::String(type_name.clone()));
-                        items.push(Value::Object(item));
+                        // stateless endpoint asks clients to replay completed items as-is. Failed,
+                        // partial, id-less or abnormally large items are not valid continuation
+                        // state and can make every later request fail with HTTP 400.
+                        if let Some(item) = replayable_hosted_web_item(type_name, data) {
+                            flush_assistant_text(&mut text_buffer, &mut items);
+                            items.push(item);
+                        }
                     }
                     _ => {}
                 }
@@ -454,6 +479,24 @@ fn is_hosted_web_item_type(kind: &str) -> bool {
         kind,
         "web_search_call" | "web_fetch_call" | "web_extractor_call"
     )
+}
+
+fn replayable_hosted_web_item(type_name: &str, data: &Value) -> Option<Value> {
+    if !is_hosted_web_item_type(type_name) {
+        return None;
+    }
+    let mut item = data.as_object()?.clone();
+    let has_id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty());
+    let completed = item.get("status").and_then(Value::as_str) == Some("completed");
+    if !has_id || !completed {
+        return None;
+    }
+    item.insert("type".to_string(), Value::String(type_name.to_string()));
+    let item = Value::Object(item);
+    (serde_json::to_vec(&item).ok()?.len() <= MAX_REPLAYABLE_HOSTED_WEB_ITEM_BYTES).then_some(item)
 }
 
 fn hosted_web_tool_name(kind: &str) -> &'static str {
@@ -932,14 +975,9 @@ fn parse_one_responses_event(data: &str, state: &mut StreamState) -> Vec<StreamE
         }
         "response.failed" | "error" if !state.stopped => {
             state.stopped = true;
-            let message = value
-                .pointer("/response/error/message")
-                .or_else(|| value.pointer("/error/message"))
-                .or_else(|| value.get("message"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("response failed");
+            let message = responses_stream_error_message(&value);
             events.push(StreamEvent::Stop {
-                reason: StopReason::Other(message.to_string()),
+                reason: StopReason::Other(message),
             });
         }
         // 未知的 response.* 事件一律忽略：OpenAI 持续新增事件类型，
@@ -948,6 +986,29 @@ fn parse_one_responses_event(data: &str, state: &mut StreamState) -> Vec<StreamE
     }
 
     events
+}
+
+fn responses_stream_error_message(value: &Value) -> String {
+    if let Some(error) = value
+        .pointer("/response/error")
+        .or_else(|| value.get("error"))
+    {
+        return normalize_api_error(&error.to_string(), "");
+    }
+
+    // In a top-level `{"type":"error", ...}` frame, `type` names the SSE event rather than the
+    // API error class. Copy only the documented safe scalar fields and map `error_type`, when a
+    // compatible gateway provides it, into the normal OpenAI error shape.
+    let mut error = serde_json::Map::new();
+    for field in ["message", "code", "param"] {
+        if let Some(value) = value.get(field) {
+            error.insert(field.to_string(), value.clone());
+        }
+    }
+    if let Some(error_type) = value.get("error_type") {
+        error.insert("type".to_string(), error_type.clone());
+    }
+    normalize_api_error(&Value::Object(error).to_string(), "")
 }
 
 /// 终帧兜底：补发没有通过 `output_item.done` 走完的工具调用。
@@ -1165,6 +1226,67 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_responses_maps_thinking_modes_to_native_reasoning_effort() {
+        let provider = ResponsesProvider::new_deepseek(
+            "sk-test".into(),
+            "deepseek-v4-pro".into(),
+            "https://api.deepseek.com".into(),
+        );
+        let mut request = request(vec![]);
+        request.model = "deepseek-v4-pro".into();
+
+        for thinking in ["adaptive", "enabled"] {
+            request.inference = hermes_core::InferenceOptions {
+                thinking: Some(thinking.into()),
+                ..Default::default()
+            };
+            let body = provider.build_body(&request, false);
+            assert_eq!(body["reasoning"]["effort"], "high");
+            assert!(!body.to_string().contains("adaptive"));
+        }
+
+        request.inference = hermes_core::InferenceOptions {
+            thinking: Some("disabled".into()),
+            reasoning_effort: Some("max".into()),
+            ..Default::default()
+        };
+        let body = provider.build_body(&request, false);
+        assert_eq!(body["reasoning"]["effort"], "none");
+        assert_eq!(
+            body["reasoning"].as_object().map(serde_json::Map::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn deepseek_responses_preserves_explicit_high_and_max_effort() {
+        let provider = ResponsesProvider::new_deepseek(
+            "sk-test".into(),
+            "deepseek-v4-pro".into(),
+            "https://api.deepseek.com".into(),
+        );
+        let mut request = request(vec![]);
+        request.model = "deepseek-v4-pro".into();
+        request.inference.thinking = Some("enabled".into());
+
+        for effort in ["high", "max"] {
+            request.inference.reasoning_effort = Some(effort.into());
+            let body = provider.build_body(&request, false);
+            assert_eq!(body["reasoning"]["effort"], effort);
+        }
+    }
+
+    #[test]
+    fn non_deepseek_responses_does_not_reinterpret_adaptive_marker() {
+        let mut request = request(vec![]);
+        request.inference.thinking = Some("adaptive".into());
+
+        let body = provider("https://api.openai.com").build_body(&request, false);
+        assert!(body.get("reasoning").is_none());
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
     fn tools_are_flat_not_nested_under_function() {
         let mut req = request(vec![]);
         req.tools = vec![ToolSpec {
@@ -1279,6 +1401,37 @@ mod tests {
         assert_eq!(items[0]["type"], "web_search_call");
         assert_eq!(items[0]["id"], "ws_1");
         assert_eq!(items[0]["action"]["query"], "Milvus hybrid search");
+    }
+
+    #[test]
+    fn only_completed_bounded_hosted_web_items_are_replayed() {
+        for data in [
+            json!({"id": "ws_failed", "status": "failed"}),
+            json!({"id": "ws_pending", "status": "in_progress"}),
+            json!({"status": "completed"}),
+        ] {
+            let message = Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Custom {
+                    type_name: "web_search_call".into(),
+                    data,
+                }],
+            };
+            assert!(message_to_items(&message, ReasoningMode::Drop).is_empty());
+        }
+
+        let oversized = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Custom {
+                type_name: "web_search_call".into(),
+                data: json!({
+                    "id": "ws_oversized",
+                    "status": "completed",
+                    "action": {"query": "x".repeat(512 * 1024)}
+                }),
+            }],
+        };
+        assert!(message_to_items(&oversized, ReasoningMode::Drop).is_empty());
     }
 
     #[test]
@@ -1791,6 +1944,18 @@ mod tests {
     }
 
     #[test]
+    fn failure_frame_preserves_safe_error_classification() {
+        let events = run_stream(&[r#"{"type":"response.failed","sequence_number":1,
+                "response":{"error":{"message":"unsupported input item","type":"invalid_request_error",
+                                       "code":"invalid_value","param":"input[37]"}}}"#]);
+        assert!(matches!(
+            &events[0],
+            StreamEvent::Stop { reason: StopReason::Other(message) }
+                if message == "unsupported input item (type=invalid_request_error, code=invalid_value, param=input[37])"
+        ));
+    }
+
+    #[test]
     fn error_frames_support_compatible_message_shapes() {
         let cases = [
             (
@@ -1798,10 +1963,18 @@ mod tests {
                 "nested error",
             ),
             (
+                r#"{"type":"error","error":{"message":"bad input","type":"invalid_request_error","code":"invalid_value","param":"tools[0]"}}"#,
+                "bad input (type=invalid_request_error, code=invalid_value, param=tools[0])",
+            ),
+            (
                 r#"{"type":"error","message":"top-level error"}"#,
                 "top-level error",
             ),
-            (r#"{"type":"error"}"#, "response failed"),
+            (
+                r#"{"type":"error","message":"top-level bad input","error_type":"invalid_request_error","code":"invalid_value","param":"input[2]"}"#,
+                "top-level bad input (type=invalid_request_error, code=invalid_value, param=input[2])",
+            ),
+            (r#"{"type":"error"}"#, "request failed"),
         ];
 
         for (frame, expected) in cases {

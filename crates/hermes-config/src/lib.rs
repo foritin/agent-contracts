@@ -5,7 +5,7 @@
 
 use hermes_error::{Error, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -147,6 +147,9 @@ pub struct OrchestrationConfig {
     /// 最多复核/修订轮数；产品层限制为 1..=3。
     #[serde(default = "default_review_rounds")]
     pub max_review_rounds: u8,
+    /// 已通过宿主连通验证的子代理候选槽。空池继续使用 delegation_router。
+    #[serde(default)]
+    pub subagent_pool: SubagentPoolConfig,
 }
 
 impl Default for OrchestrationConfig {
@@ -158,7 +161,132 @@ impl Default for OrchestrationConfig {
             quality_loop: QualityLoopMode::Off,
             quality_reviewer: QualityReviewer::RCode,
             max_review_rounds: default_review_rounds(),
+            subagent_pool: SubagentPoolConfig::default(),
         }
+    }
+}
+
+pub const MAX_SUBAGENT_PROVIDER_SLOTS: usize = 3;
+pub const MAX_SUBAGENT_SLOT_ID_CHARS: usize = 80;
+pub const MAX_SUBAGENT_SOURCE_ID_CHARS: usize = 160;
+pub const MAX_SUBAGENT_MODEL_CHARS: usize = 320;
+pub const MAX_SUBAGENT_PROMPT_TEMPLATE_ID_CHARS: usize = 80;
+pub const MAX_SUBAGENT_PROMPT_CHARS: usize = 12_000;
+
+/// 一个候选槽引用的执行来源。槽位身份由 `slot_id` 决定，因此来源允许重复。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SubagentProviderSource {
+    /// R-Code 已配置的 HTTP LLM Provider profile。
+    ApiProvider { provider_id: String },
+    /// 本机受信任的 Codex CLI。
+    CodexCli,
+}
+
+/// 一个可独立加权、可独立设定角色 Prompt 的候选槽。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentProviderSlot {
+    pub slot_id: String,
+    pub source: SubagentProviderSource,
+    pub model: String,
+    pub weight: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_template_id: Option<String>,
+    pub prompt: String,
+}
+
+/// 子代理候选池。空池表示尚未启用加权路由，保持旧版 delegation_router 行为。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentPoolConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<SubagentProviderSlot>,
+}
+
+fn validate_bounded_identifier(field: &str, value: &str, max_chars: usize) -> Result<()> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.contains('\0')
+        || value.chars().any(char::is_control)
+        || value.chars().count() > max_chars
+    {
+        return Err(Error::Config(format!(
+            "{field} must be trimmed, non-empty, contain no control characters, and be at most {max_chars} characters"
+        )));
+    }
+    Ok(())
+}
+
+impl SubagentPoolConfig {
+    /// 只验证持久化合同；来源存在性和连通 receipt 由宿主在原子保存时复核。
+    pub fn validate(&self) -> Result<()> {
+        if self.slots.len() > MAX_SUBAGENT_PROVIDER_SLOTS {
+            return Err(Error::Config(format!(
+                "orchestration.subagent_pool supports at most {MAX_SUBAGENT_PROVIDER_SLOTS} slots"
+            )));
+        }
+        if self.slots.is_empty() {
+            return Ok(());
+        }
+
+        let mut slot_ids = HashSet::with_capacity(self.slots.len());
+        let mut weight_sum = 0_u16;
+        for slot in &self.slots {
+            validate_bounded_identifier(
+                "orchestration.subagent_pool.slot_id",
+                &slot.slot_id,
+                MAX_SUBAGENT_SLOT_ID_CHARS,
+            )?;
+            if !slot_ids.insert(slot.slot_id.as_str()) {
+                return Err(Error::Config(format!(
+                    "orchestration.subagent_pool contains duplicate slot_id '{}'",
+                    slot.slot_id
+                )));
+            }
+            match &slot.source {
+                SubagentProviderSource::ApiProvider { provider_id } => {
+                    validate_bounded_identifier(
+                        "orchestration.subagent_pool.provider_id",
+                        provider_id,
+                        MAX_SUBAGENT_SOURCE_ID_CHARS,
+                    )?;
+                }
+                SubagentProviderSource::CodexCli => {}
+            }
+            validate_bounded_identifier(
+                "orchestration.subagent_pool.model",
+                &slot.model,
+                MAX_SUBAGENT_MODEL_CHARS,
+            )?;
+            if !(1..=100).contains(&slot.weight) {
+                return Err(Error::Config(format!(
+                    "orchestration.subagent_pool slot '{}' weight must be between 1 and 100",
+                    slot.slot_id
+                )));
+            }
+            weight_sum += u16::from(slot.weight);
+            if let Some(template_id) = slot.prompt_template_id.as_deref() {
+                validate_bounded_identifier(
+                    "orchestration.subagent_pool.prompt_template_id",
+                    template_id,
+                    MAX_SUBAGENT_PROMPT_TEMPLATE_ID_CHARS,
+                )?;
+            }
+            if slot.prompt.trim().is_empty()
+                || slot.prompt.contains('\0')
+                || slot.prompt.chars().count() > MAX_SUBAGENT_PROMPT_CHARS
+            {
+                return Err(Error::Config(format!(
+                    "orchestration.subagent_pool slot '{}' prompt must be non-empty, contain no NUL, and be at most {MAX_SUBAGENT_PROMPT_CHARS} characters",
+                    slot.slot_id
+                )));
+            }
+        }
+        if weight_sum != 100 {
+            return Err(Error::Config(format!(
+                "orchestration.subagent_pool enabled weights must total 100, got {weight_sum}"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -345,6 +473,7 @@ impl Config {
                 "orchestration.max_review_rounds must be between 1 and 3".to_string(),
             ));
         }
+        self.orchestration.subagent_pool.validate()?;
         if !self.providers.contains_key(&self.default_provider) {
             return Err(Error::Config(format!(
                 "default provider '{}' not configured",
@@ -391,6 +520,230 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::sync::Mutex;
+
+    fn subagent_slot(slot_id: &str, provider_id: &str, weight: u8) -> SubagentProviderSlot {
+        SubagentProviderSlot {
+            slot_id: slot_id.to_string(),
+            source: SubagentProviderSource::ApiProvider {
+                provider_id: provider_id.to_string(),
+            },
+            model: "test-model".to_string(),
+            weight,
+            prompt_template_id: Some("implementation".to_string()),
+            prompt: "Implement the delegated feature and report verification evidence.".to_string(),
+        }
+    }
+
+    #[test]
+    fn legacy_orchestration_defaults_to_an_empty_subagent_pool() {
+        let orchestration: OrchestrationConfig = toml::from_str(
+            r#"
+default_agent_engine = "r_code"
+delegation_router = "balanced"
+allow_cross_engine_delegation = true
+quality_loop = "off"
+quality_reviewer = "r_code"
+max_review_rounds = 1
+"#,
+        )
+        .unwrap();
+        assert!(orchestration.subagent_pool.slots.is_empty());
+        assert_eq!(
+            orchestration.delegation_router,
+            DelegationRouterMode::Balanced
+        );
+    }
+
+    #[test]
+    fn repeated_provider_sources_roundtrip_as_distinct_slots() {
+        let pool = SubagentPoolConfig {
+            slots: vec![
+                subagent_slot("implementer", "openai", 60),
+                subagent_slot("reviewer", "openai", 40),
+            ],
+        };
+        pool.validate().unwrap();
+
+        let encoded = toml::to_string(&pool).unwrap();
+        let decoded: SubagentPoolConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded, pool);
+        assert!(matches!(
+            decoded.slots[0].source,
+            SubagentProviderSource::ApiProvider { ref provider_id } if provider_id == "openai"
+        ));
+        assert!(matches!(
+            decoded.slots[1].source,
+            SubagentProviderSource::ApiProvider { ref provider_id } if provider_id == "openai"
+        ));
+    }
+
+    #[test]
+    fn one_and_three_slot_pools_accept_api_and_codex_sources() {
+        let mut codex = subagent_slot("codex", "unused", 100);
+        codex.source = SubagentProviderSource::CodexCli;
+        let single = SubagentPoolConfig { slots: vec![codex] };
+        single.validate().unwrap();
+
+        let api = subagent_slot("api", "openai", 34);
+        let mut codex = subagent_slot("codex", "unused", 33);
+        codex.source = SubagentProviderSource::CodexCli;
+        let second_api = subagent_slot("second-api", "anthropic", 33);
+        let pool = SubagentPoolConfig {
+            slots: vec![api, codex, second_api],
+        };
+        pool.validate().unwrap();
+
+        let encoded = toml::to_string(&pool).unwrap();
+        let decoded: SubagentPoolConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded, pool);
+    }
+
+    #[test]
+    fn subagent_pool_rejects_duplicate_slot_ids_and_a_fourth_slot() {
+        let duplicate = SubagentPoolConfig {
+            slots: vec![
+                subagent_slot("same", "openai", 50),
+                subagent_slot("same", "anthropic", 50),
+            ],
+        };
+        assert!(duplicate
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate slot_id 'same'"));
+
+        let four = SubagentPoolConfig {
+            slots: vec![
+                subagent_slot("one", "openai", 25),
+                subagent_slot("two", "openai", 25),
+                subagent_slot("three", "openai", 25),
+                subagent_slot("four", "openai", 25),
+            ],
+        };
+        assert!(four
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("supports at most 3 slots"));
+    }
+
+    #[test]
+    fn subagent_pool_rejects_zero_and_non_hundred_weight_totals() {
+        let zero = SubagentPoolConfig {
+            slots: vec![subagent_slot("zero", "openai", 0)],
+        };
+        assert!(zero
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("weight must be between 1 and 100"));
+
+        let under = SubagentPoolConfig {
+            slots: vec![subagent_slot("weighted", "openai", 99)],
+        };
+        assert!(under
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("weights must total 100, got 99"));
+
+        let over = SubagentPoolConfig {
+            slots: vec![
+                subagent_slot("first", "openai", 50),
+                subagent_slot("second", "openai", 51),
+            ],
+        };
+        assert!(over
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("weights must total 100, got 101"));
+    }
+
+    #[test]
+    fn subagent_pool_rejects_invalid_prompt_and_identifiers() {
+        let max_slot_id = "s".repeat(MAX_SUBAGENT_SLOT_ID_CHARS);
+        let max_provider_id = "p".repeat(MAX_SUBAGENT_SOURCE_ID_CHARS);
+        let mut boundary = subagent_slot(&max_slot_id, &max_provider_id, 100);
+        boundary.model = "m".repeat(MAX_SUBAGENT_MODEL_CHARS);
+        boundary.prompt_template_id = Some("t".repeat(MAX_SUBAGENT_PROMPT_TEMPLATE_ID_CHARS));
+        boundary.prompt = "x".repeat(MAX_SUBAGENT_PROMPT_CHARS);
+        SubagentPoolConfig {
+            slots: vec![boundary],
+        }
+        .validate()
+        .unwrap();
+
+        let mut empty_prompt = subagent_slot("prompt", "openai", 100);
+        empty_prompt.prompt = "  \n".to_string();
+        let error = SubagentPoolConfig {
+            slots: vec![empty_prompt],
+        }
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("prompt must be non-empty"));
+
+        let mut nul_prompt = subagent_slot("prompt", "openai", 100);
+        nul_prompt.prompt = "before\0after".to_string();
+        let error = SubagentPoolConfig {
+            slots: vec![nul_prompt],
+        }
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("contain no NUL"));
+
+        let mut oversized_prompt = subagent_slot("prompt", "openai", 100);
+        oversized_prompt.prompt = "x".repeat(MAX_SUBAGENT_PROMPT_CHARS + 1);
+        let error = SubagentPoolConfig {
+            slots: vec![oversized_prompt],
+        }
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("at most 12000 characters"));
+
+        let mut padded_id = subagent_slot(" padded ", "openai", 100);
+        padded_id.prompt_template_id = None;
+        let error = SubagentPoolConfig {
+            slots: vec![padded_id],
+        }
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("subagent_pool.slot_id"));
+
+        let mut invalid_provider = subagent_slot("provider", "open\nai", 100);
+        invalid_provider.prompt_template_id = None;
+        let error = SubagentPoolConfig {
+            slots: vec![invalid_provider],
+        }
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("subagent_pool.provider_id"));
+
+        let mut invalid_model = subagent_slot("model", "openai", 100);
+        invalid_model.model = "m".repeat(MAX_SUBAGENT_MODEL_CHARS + 1);
+        let error = SubagentPoolConfig {
+            slots: vec![invalid_model],
+        }
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("subagent_pool.model"));
+
+        let mut invalid_template = subagent_slot("template", "openai", 100);
+        invalid_template.prompt_template_id = Some("bad\0template".to_string());
+        let error = SubagentPoolConfig {
+            slots: vec![invalid_template],
+        }
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("subagent_pool.prompt_template_id"));
+    }
 
     // 环境变量是进程级全局状态，多个测试并行操作会竞态；用锁串行化。
     static ENV_LOCK: Mutex<()> = Mutex::new(());

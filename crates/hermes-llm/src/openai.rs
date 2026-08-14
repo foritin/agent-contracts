@@ -118,8 +118,35 @@ impl OpenAiProvider {
         }
 
         let model_lower = request.model.to_ascii_lowercase();
-        let deepseek_thinking = model_lower.contains("deepseek")
-            && matches!(request.inference.thinking.as_deref(), Some("enabled"));
+        // `adaptive` is an R-Code-side governor marker for DeepSeek, not a value accepted by
+        // DeepSeek's Chat Completions API.  The governor may replace it with `disabled` for a
+        // cheap exploration turn; if it reaches the transport unchanged, start from the native
+        // thinking-enabled (high-by-default) mode.  Keep the literal value for every other
+        // OpenAI-compatible provider, where `adaptive` may have provider-specific semantics.
+        let is_deepseek = self.force_stream_usage || model_lower.contains("deepseek");
+        let is_deepseek_v4 = is_deepseek && model_lower.contains("deepseek-v4");
+        let thinking = request.inference.thinking.as_deref().map(|thinking| {
+            if is_deepseek_v4 && thinking == "adaptive" {
+                "enabled"
+            } else {
+                thinking
+            }
+        });
+        let deepseek_thinking = is_deepseek && matches!(thinking, Some("enabled"));
+        let reasoning_effort = if is_deepseek_v4 {
+            match request.inference.thinking.as_deref() {
+                // The off switch wins over a stale effort saved by an earlier UI selection.
+                Some("disabled") => None,
+                Some("enabled" | "adaptive") => request
+                    .inference
+                    .reasoning_effort
+                    .as_deref()
+                    .or(Some("high")),
+                _ => request.inference.reasoning_effort.as_deref(),
+            }
+        } else {
+            request.inference.reasoning_effort.as_deref()
+        };
 
         // 发送前修复悬空工具调用对（Reasonix `SanitizeToolPairing`）：健康历史
         // 零拷贝透传（返回 None），只有存在未配对 tool_call / 孤儿 ToolResult
@@ -147,14 +174,14 @@ impl OpenAiProvider {
         if let Some(temp) = request.temperature.filter(|_| !deepseek_thinking) {
             body["temperature"] = json!(temp);
         }
-        if let Some(thinking) = request.inference.thinking.as_deref() {
+        if let Some(thinking) = thinking {
             if model_lower.contains("qwen") {
                 body["enable_thinking"] = json!(thinking != "disabled");
             } else {
                 body["thinking"] = json!({ "type": thinking });
             }
         }
-        if let Some(effort) = request.inference.reasoning_effort.as_deref() {
+        if let Some(effort) = reasoning_effort {
             body["reasoning_effort"] = json!(effort);
         }
         if let Some(verbosity) = request.inference.verbosity.as_deref() {
@@ -889,7 +916,7 @@ pub(crate) fn map_api_error(status: u16, body: &str, api_key: &str) -> Error {
     }
 }
 
-fn normalize_api_error(body: &str, api_key: &str) -> String {
+pub(crate) fn normalize_api_error(body: &str, api_key: &str) -> String {
     let parsed = serde_json::from_str::<Value>(body).ok();
     let details = parsed
         .as_ref()
@@ -1446,6 +1473,95 @@ mod tests {
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["reasoning_effort"], "high");
         assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn deepseek_chat_maps_local_adaptive_marker_to_native_enabled() {
+        let provider = OpenAiProvider::new(
+            "k".into(),
+            "deepseek-v4-pro".into(),
+            "https://api.deepseek.com".into(),
+        );
+        let request = CompletionRequest {
+            model: "deepseek-v4-pro".into(),
+            system: None,
+            messages: vec![Message::user_text("hi")],
+            tools: vec![],
+            hosted_tools: vec![],
+            max_tokens: 16,
+            temperature: Some(0.7),
+            enable_caching: false,
+            inference: hermes_core::InferenceOptions {
+                thinking: Some("adaptive".into()),
+                ..Default::default()
+            },
+        };
+
+        let body = provider.build_body(&request, false);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(!body.to_string().contains("adaptive"));
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn deepseek_chat_preserves_explicit_disabled_high_and_max_modes() {
+        let provider = OpenAiProvider::new(
+            "k".into(),
+            "deepseek-v4-pro".into(),
+            "https://api.deepseek.com".into(),
+        );
+        let mut request = CompletionRequest {
+            model: "deepseek-v4-pro".into(),
+            system: None,
+            messages: vec![Message::user_text("hi")],
+            tools: vec![],
+            hosted_tools: vec![],
+            max_tokens: 16,
+            temperature: None,
+            enable_caching: false,
+            inference: Default::default(),
+        };
+
+        request.inference.thinking = Some("disabled".into());
+        request.inference.reasoning_effort = Some("max".into());
+        let disabled = provider.build_body(&request, false);
+        assert_eq!(disabled["thinking"]["type"], "disabled");
+        assert!(disabled.get("reasoning_effort").is_none());
+
+        request.inference.thinking = Some("enabled".into());
+        for effort in ["high", "max"] {
+            request.inference.reasoning_effort = Some(effort.into());
+            let body = provider.build_body(&request, false);
+            assert_eq!(body["thinking"]["type"], "enabled");
+            assert_eq!(body["reasoning_effort"], effort);
+        }
+    }
+
+    #[test]
+    fn non_deepseek_chat_keeps_provider_native_adaptive_semantics() {
+        let provider = OpenAiProvider::new(
+            "k".into(),
+            "vendor-model".into(),
+            "https://gateway.example/v1".into(),
+        );
+        let request = CompletionRequest {
+            model: "vendor-model".into(),
+            system: None,
+            messages: vec![],
+            tools: vec![],
+            hosted_tools: vec![],
+            max_tokens: 16,
+            temperature: None,
+            enable_caching: false,
+            inference: hermes_core::InferenceOptions {
+                thinking: Some("adaptive".into()),
+                ..Default::default()
+            },
+        };
+
+        let body = provider.build_body(&request, false);
+        assert_eq!(body["thinking"]["type"], "adaptive");
     }
 
     #[test]
