@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Shared error types for agent-core (thiserror-based, cross-module propagation)"
+description = "Shared error types for agent-contracts (thiserror-based, cross-module propagation)"
 
 [dependencies]
 thiserror = { workspace = true }

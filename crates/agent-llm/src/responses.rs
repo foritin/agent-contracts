@@ -396,17 +396,15 @@ pub fn message_to_items(msg: &Message, reasoning: ReasoningMode) -> Vec<Value> {
                                 }));
                             }
                             ReasoningMode::PlaintextReplay => {
-                                let text = thinking.trim();
-                                if text.is_empty() {
-                                    continue;
-                                }
                                 // DeepSeek Responses 的 thinking 模式要求把明文 reasoning_text
-                                // 原样回传；reasoning item 必须紧邻它的配对产物之前。
+                                // 原样回传；reasoning item 必须紧邻它的配对产物之前。工具调用
+                                // 轮次可能返回空 reasoning_text，空字符串同样有协议语义，
+                                // 丢弃会让下一轮请求 400，因此这里不能按 trim 后是否为空过滤。
                                 flush_assistant_text(&mut text_buffer, &mut items);
                                 items.push(json!({
                                     "type": "reasoning",
                                     "content": [
-                                        { "type": "reasoning_text", "text": text }
+                                        { "type": "reasoning_text", "text": thinking.as_str() }
                                     ],
                                 }));
                             }
@@ -672,12 +670,10 @@ fn parse_responses_response_with_cache(
                         });
                     }
                     ReasoningMode::PlaintextReplay => {
-                        let text = reasoning_text_of(item);
-                        if text.is_empty() {
-                            continue;
-                        }
+                        // DeepSeek V4 的工具调用轮次会返回空 reasoning_text，下一轮必须
+                        // 把这个空 item 原样回传，否则 400。解析端不能丢弃空 reasoning。
                         content.push(ContentBlock::Thinking {
-                            thinking: text,
+                            thinking: reasoning_text_of(item),
                             signature: None,
                         });
                     }
@@ -1149,7 +1145,10 @@ fn emit_completed_reasoning_item(
         ReasoningMode::PlaintextReplay => reasoning_text_of(item),
         _ => reasoning_summary_text(item),
     };
-    if !text.is_empty() {
+    // PlaintextReplay（DeepSeek Responses）必须保留空 reasoning 的“存在性”：工具调用
+    // 轮次可能返回空 reasoning_text，上层需要据此在下一轮回传一个空 reasoning item。
+    // 其余模式只在有可见摘要时才发事件，避免制造无意义的空事件。
+    if state.reasoning == ReasoningMode::PlaintextReplay || !text.is_empty() {
         events.push(StreamEvent::ReasoningDelta { text });
     }
 }
@@ -1340,6 +1339,63 @@ mod tests {
             &parsed.content[0],
             ContentBlock::Thinking { thinking, signature: None } if thinking == "先想一下再回答"
         ));
+    }
+
+    #[test]
+    fn deepseek_empty_reasoning_survives_serialization_parse_and_sanitization() {
+        let provider = ResponsesProvider::new_deepseek(
+            "sk-test".into(),
+            "deepseek-v4-pro".into(),
+            "https://api.deepseek.com".into(),
+        );
+
+        // 序列化端：工具调用轮次的空 reasoning 必须以空 reasoning_text 内容块回传。
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    input: json!({"path": "/a"}),
+                },
+            ],
+        };
+        let items = message_to_items(&message, provider.reasoning);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["type"], "reasoning");
+        assert_eq!(items[0]["content"][0]["type"], "reasoning_text");
+        assert_eq!(items[0]["content"][0]["text"], "");
+        assert_eq!(items[1]["type"], "function_call");
+
+        // sanitize 不能把空 reasoning 当作“无配对产物”丢掉。
+        let sanitized = sanitize_input_items(items);
+        assert_eq!(sanitized.len(), 2);
+        assert_eq!(sanitized[0]["type"], "reasoning");
+
+        // 解析端：空 reasoning_text 也保留为 Thinking 块，供下一轮原样回传。
+        let response = json!({
+            "output": [
+                { "type": "reasoning", "content": [ { "type": "reasoning_text", "text": "" } ] },
+                { "type": "function_call", "call_id": "call_1", "name": "read_file",
+                  "arguments": "{\"path\":\"/a\"}" }
+            ]
+        });
+        let parsed =
+            parse_responses_response_with_cache(&response, ReasoningMode::PlaintextReplay, true)
+                .unwrap();
+        assert_eq!(parsed.content.len(), 2);
+        assert!(matches!(
+            &parsed.content[0],
+            ContentBlock::Thinking {
+                thinking,
+                signature: None,
+            } if thinking.is_empty()
+        ));
+        assert!(matches!(&parsed.content[1], ContentBlock::ToolUse { .. }));
     }
 
     #[test]
@@ -1928,6 +1984,24 @@ mod tests {
         );
         assert!(events.iter().any(
             |event| matches!(event, StreamEvent::ReasoningDelta { text } if text == "先想一下再回答")
+        ));
+    }
+
+    #[test]
+    fn deepseek_empty_reasoning_item_still_emits_a_delta_for_replay() {
+        // 工具调用轮次可能只收到一个空 reasoning item：不能因为文本为空就当作
+        // “没有 reasoning”，否则下一轮缺少空 reasoning_text 会 400。
+        let events = run_stream_with_reasoning(
+            ReasoningMode::PlaintextReplay,
+            &[
+                r#"{"type":"response.output_item.done","sequence_number":1,
+                    "item":{"type":"reasoning","id":"rs_1",
+                            "content":[{"type":"reasoning_text","text":""}]}}"#,
+            ],
+        );
+        assert!(matches!(
+            &events[..],
+            [StreamEvent::ReasoningDelta { text }] if text.is_empty()
         ));
     }
 

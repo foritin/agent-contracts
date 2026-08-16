@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Core abstractions for agent-core: Message, ContentBlock, Session, shared traits"
+description = "Core abstractions for agent-contracts: Message, ContentBlock, Session, shared traits"
 
 [dependencies]
 agent-error = { workspace = true }

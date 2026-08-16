@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Agent Core 开发对照清单 · agent-core</title>
+  <title>Agent Contracts 开发对照清单 · agent-contracts</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -133,7 +133,7 @@
 <body>
   <header class="site-header">
     <div class="site-header__inner">
-      <a class="brand" href="index.html">agent-core</a>
+      <a class="brand" href="index.html">agent-contracts</a>
       <nav class="site-nav" aria-label="导航">
         <a href="index.html">文档总览</a>
         <a href="14-common-quality-gates.html">质量门禁</a>
@@ -144,10 +144,10 @@
 
   <main class="wrap">
     <section class="hero">
-      <h1>Agent Core 开发对照清单</h1>
+      <h1>Agent Contracts 开发对照清单</h1>
       <p>基于 <code>00-overview</code>～<code>15-document-boundary</code> 全部规范生成。覆盖实施步骤（并行 / 串行）、可验证步骤（单元 / 集成 / 契约测试）与验收标准。</p>
       <p>勾选状态自动保存到本地（localStorage），可离线使用、可打印。</p>
-      <blockquote style="margin-top:1.2rem;padding:.8rem 1rem;border-left:4px solid var(--accent);background:var(--accent-soft);border-radius:0 10px 10px 0;font-size:.92rem;"><b>范围边界</b>：agent-core 是<b>公共层</b>，只交付稳定合同（trait / DTO / 错误）与公共侧测试。产品专属类型走 <code>Custom</code> 扩展钩子（不硬编码进公共枚举）；产品专属实现（网关桥接、Tauri 命令、双消费者契约测试、发布签核）属下游产品仓库职责，不在本清单勾选范围。</blockquote>
+      <blockquote style="margin-top:1.2rem;padding:.8rem 1rem;border-left:4px solid var(--accent);background:var(--accent-soft);border-radius:0 10px 10px 0;font-size:.92rem;"><b>范围边界</b>：agent-contracts 是<b>公共层</b>，只交付稳定合同（trait / DTO / 错误）与公共侧测试。产品专属类型走 <code>Custom</code> 扩展钩子（不硬编码进公共枚举）；产品专属实现（网关桥接、Tauri 命令、双消费者契约测试、发布签核）属下游产品仓库职责，不在本清单勾选范围。</blockquote>
       <div class="legend">
         <span><span class="tag tag--parallel">并行</span>无相互依赖，可多人同时推进</span>
         <span><span class="tag tag--serial">串行</span>存在前置依赖，必须按序</span>
@@ -203,7 +203,7 @@
         <p class="note"><b>串行前置</b>：无（起点）。<b>可并行</b>：<code>agent-error</code>、<code>agent-contract</code> 的 Message / Session DTO 三者无相互依赖，可同时启动。<b>来源</b>：04-message-types、07-error-handling、02-session-management。</p>
         <div class="group" data-group="impl-p0">
           <h3>0.1 工作区骨架 <span class="tag tag--serial">串行</span> <span class="count"></span></h3>
-          <div class="task"><input type="checkbox" data-id="impl-p0-skeleton" checked><div class="task__main"><div class="task__label">创建 <code>agent-core/Cargo.toml</code> workspace（resolver="2"），登记成员 crate</div><div class="task__meta">对应 <code>11-crate-mapping</code> 工作区结构；先空壳后填充</div></div></div>
+          <div class="task"><input type="checkbox" data-id="impl-p0-skeleton" checked><div class="task__main"><div class="task__label">创建 <code>agent-contracts/Cargo.toml</code> workspace（resolver="2"），登记成员 crate</div><div class="task__meta">对应 <code>11-crate-mapping</code> 工作区结构；先空壳后填充</div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p0-ci" checked><div class="task__main"><div class="task__label">建立 CI 基线：<code>cargo fmt --check</code> / <code>cargo clippy -D warnings</code> / <code>cargo test</code></div><div class="task__meta">静态质量门先行，见 14 篇「静态」层</div></div></div>
         </div>
         <div class="group" data-group="impl-p0">
@@ -439,10 +439,10 @@
     </details>
 
     <details class="phase" data-phase="TEST-dual">
-      <summary><span class="chev">▶</span><h2>下游消费者验证（非 agent-core 范围）</h2></summary>
+      <summary><span class="chev">▶</span><h2>下游消费者验证（非 agent-contracts 范围）</h2></summary>
       <div class="phase__body">
-        <p class="note"><b>范围边界</b>：agent-core 是公共层，只交付合同与公共侧测试。下列“两个下游消费者对同一向量给出一致结果”的验证属产品仓库职责，不在本 crate 勾选范围内（<code>13 §7</code>）。agent-core 侧需保证的是：合同稳定、可被任意消费者独立实现并通过。</p>
-        <div class="gate"><h4>agent-core 侧义务</h4><p>① 公开 trait / DTO 稳定且有版本策略；② 提供无网络、可重复的公共测试向量（V-*）；③ 不向公共 crate 反向渗入任何产品私有类型；④ 破坏性变更附迁移说明。消费者侧的契约测试由各产品仓库维护。</p></div>
+        <p class="note"><b>范围边界</b>：agent-contracts 是公共层，只交付合同与公共侧测试。下列“两个下游消费者对同一向量给出一致结果”的验证属产品仓库职责，不在本 crate 勾选范围内（<code>13 §7</code>）。agent-contracts 侧需保证的是：合同稳定、可被任意消费者独立实现并通过。</p>
+        <div class="gate"><h4>agent-contracts 侧义务</h4><p>① 公开 trait / DTO 稳定且有版本策略；② 提供无网络、可重复的公共测试向量（V-*）；③ 不向公共 crate 反向渗入任何产品私有类型；④ 破坏性变更附迁移说明。消费者侧的契约测试由各产品仓库维护。</p></div>
       </div>
     </details>
 
@@ -494,25 +494,25 @@
     <details class="phase" data-phase="ACCEPT-release">
       <summary><span class="chev">▶</span><h2>发布前签核清单 <span class="count" data-count></span></h2></summary>
       <div class="phase__body">
-        <p class="note">源自 <code>14 §6</code>。agent-core 作为公共层只对「公共合同本身」签核；产品可用性/安全/发布由各产品仓库各自质量门负责。</p>
+        <p class="note">源自 <code>14 §6</code>。agent-contracts 作为公共层只对「公共合同本身」签核；产品可用性/安全/发布由各产品仓库各自质量门负责。</p>
         <div class="group" data-group="accept-release">
-          <h3>agent-core 侧签核（公共合同本身） <span class="count"></span></h3>
+          <h3>agent-contracts 侧签核（公共合同本身） <span class="count"></span></h3>
           <div class="task"><input type="checkbox" data-id="accept-rel-vec" checked><div class="task__main"><div class="task__label">最小测试向量在无网络环境下通过</div></div></div>
           <div class="task"><input type="checkbox" data-id="accept-rel-migration" checked><div class="task__main"><div class="task__label">API、配置、JSONL 和 IPC 的破坏性变更均带迁移页与版本号</div></div></div>
           <div class="task"><input type="checkbox" data-id="accept-rel-noleak" checked><div class="task__main"><div class="task__label">公共 crate 不含任何产品私有类型（依赖审计：公共 crate 不依赖产品私有 crate，无产品专属 DTO 变体）</div></div></div>
         </div>
-        <div class="gate"><h4>下游产品侧签核（非 agent-core 范围，由各产品仓库维护）</h4><p>① 各产品固定同一 agent-core tag/commit；② 至少一个真实 Provider + mock 通过流式契约；③ 至少一个 stdio + 一个 HTTP MCP fixture 通过断开/超时；④ 会话截断/配置坏值/取消配对/未知工具四类故障演练有记录；⑤ 两产品可在不读取对方源码条件下凭本文档创建一致接口。这些项不在本 crate 勾选范围内。</p></div>
+        <div class="gate"><h4>下游产品侧签核（非 agent-contracts 范围，由各产品仓库维护）</h4><p>① 各产品固定同一 agent-contracts tag/commit；② 至少一个真实 Provider + mock 通过流式契约；③ 至少一个 stdio + 一个 HTTP MCP fixture 通过断开/超时；④ 会话截断/配置坏值/取消配对/未知工具四类故障演练有记录；⑤ 两产品可在不读取对方源码条件下凭本文档创建一致接口。这些项不在本 crate 勾选范围内。</p></div>
       </div>
     </details>
 
     <div class="footer">
-      本清单依据 agent-core 文档站 00–15 篇生成 · 勾选状态保存于浏览器 localStorage · <a href="index.html">返回文档总览</a>
+      本清单依据 agent-contracts 文档站 00–15 篇生成 · 勾选状态保存于浏览器 localStorage · <a href="index.html">返回文档总览</a>
     </div>
   </main>
 
   <script>
     (function () {
-      var STORAGE_KEY = 'agent-core-checklist-v1';
+      var STORAGE_KEY = 'agent-contracts-checklist-v1';
       var boxes = Array.prototype.slice.call(document.querySelectorAll('input[type="checkbox"][data-id]'));
       var allBoxes = boxes;
 

@@ -1,4 +1,4 @@
-# agent-core
+# agent-contracts
 
 R-Code（桌面 Agentic IDE）与 Tiny Hermes（自进化 AI Agent）共享的公共模块。
 以独立 Rust workspace 提供，可被两个产品以 git submodule 形式固定版本引用。
@@ -30,14 +30,14 @@ cargo doc --no-deps --workspace
 
 ```bash
 # 在 R-Code 或 Tiny Hermes 根目录
-git submodule add <agent-core-repo-url> vendor/agent-core
+git submodule add <agent-contracts-repo-url> vendor/agent-contracts
 git submodule update --init --recursive
 
 # 升级时显式审查并固定
-git -C vendor/agent-core fetch --tags
-git -C vendor/agent-core checkout <reviewed-tag-or-commit>
-git add vendor/agent-core .gitmodules
-git commit -m "docs: pin agent-core contract <version>"
+git -C vendor/agent-contracts fetch --tags
+git -C vendor/agent-contracts checkout <reviewed-tag-or-commit>
+git add vendor/agent-contracts .gitmodules
+git commit -m "docs: pin agent-contracts contract <version>"
 ```
 
 在产品根 `Cargo.toml` 中：
@@ -45,10 +45,10 @@ git commit -m "docs: pin agent-core contract <version>"
 ```toml
 [workspace]
 resolver = "2"
-members = ["vendor/agent-core/crates/*", "crates/*"]
+members = ["vendor/agent-contracts/crates/*", "crates/*"]
 
 [workspace.dependencies]
-agent-contract = { path = "vendor/agent-core/crates/agent-contract" }
+agent-contract = { path = "vendor/agent-contracts/crates/agent-contract" }
 # ... 其他公共 crate
 ```
 

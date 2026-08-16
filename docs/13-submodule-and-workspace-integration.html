@@ -4,36 +4,36 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>公共模块作为子模块：集成合同 · agent-core</title>
+  <title>公共模块作为子模块：集成合同 · agent-contracts</title>
   <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
-  <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-core</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Core</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
+  <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-contracts</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Contracts</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
   <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="公共模块作为子模块-集成合同">公共模块作为子模块：集成合同</h1>
 <h2 id="1-本文的定位">1. 本文的定位</h2>
-<p><code>agent-core</code> 是 R-Code 与 Tiny Hermes 的<strong>共同重构规范包</strong>。它不是某一端应用的<br>实现，也不携带产品私有功能；它定义两端必须保持一致的消息、Provider、会话、工具、MCP、<br>压缩、配置、错误和进程通信合同。</p>
+<p><code>agent-contracts</code> 是 R-Code 与 Tiny Hermes 的<strong>共同重构规范包</strong>。它不是某一端应用的<br>实现，也不携带产品私有功能；它定义两端必须保持一致的消息、Provider、会话、工具、MCP、<br>压缩、配置、错误和进程通信合同。</p>
 <p>本目录可以独立建仓并以 Git submodule 固定到两个目标仓库。这样做的目的不是让两个产品<br>共享一个不受约束的代码目录，而是让它们共享一份可版本化、可审查、可验证的公共边界。</p>
 <blockquote><p>本交付物仅包含重构文档。实现团队应按本文档在自己的 Rust workspace 中创建 crate；<br>不能把文档中的建议性目录当成已经存在的库。</p></blockquote>
 <h2 id="2-可打包目录合同">2. 可打包目录合同</h2>
 <p>将下列三个目录放到同一个父目录后，任意一个 <code>index.html</code> 都应可离线打开：</p>
 <div class="code-block"><span class="code-block__lang">text</span><button class="copy-code" type="button">复制</button><pre><code class="language-text">rebuild-kit/
-├── agent-core/          # 本目录：公共合同与集成顺序
+├── agent-contracts/          # 本目录：公共合同与集成顺序
 ├── r-code/         # R-Code（R-Code）特有产品与实现说明
 └── tiny-hermes/     # Tiny Hermes 特有产品与实现说明</code></pre></div>
 <p>跨目录链接以这三个目录同级为前提。每个目录本身也有完整的入口、目录、代码示例、<br>验收项和来源说明；即使暂时不打开另两个目录，也不会缺少本项目的执行步骤。</p>
 <h2 id="3-推荐的-git-布局">3. 推荐的 Git 布局</h2>
 <p>公共规范仓库和两个实现仓库分别拥有版本号。实现仓库只固定公共规范的 commit，不直接跟随<br><code>main</code>，以保证一次发布所依据的合同可重现。</p>
 <div class="code-block"><span class="code-block__lang">bash</span><button class="copy-code" type="button">复制</button><pre><code class="language-bash"># 在 R-Code（R-Code）或 Tiny Hermes 的重构仓库根目录执行
-git submodule add &lt;public-docs-or-contract-repo&gt; vendor/agent-core
+git submodule add &lt;public-docs-or-contract-repo&gt; vendor/agent-contracts
 git submodule update --init --recursive
 
 # 升级时必须显式审查差异，并在产品仓库中提交新的 gitlink
-git -C vendor/agent-core fetch --tags
-git -C vendor/agent-core checkout &lt;reviewed-tag-or-commit&gt;
-git add vendor/agent-core .gitmodules
-git commit -m &quot;docs: pin agent-core contract &lt;version&gt;&quot;</code></pre></div>
+git -C vendor/agent-contracts fetch --tags
+git -C vendor/agent-contracts checkout &lt;reviewed-tag-or-commit&gt;
+git add vendor/agent-contracts .gitmodules
+git commit -m &quot;docs: pin agent-contracts contract &lt;version&gt;&quot;</code></pre></div>
 <p>如果团队将公共 crate 与公共规范放在同一仓库，建议保持两层目录：</p>
-<div class="code-block"><span class="code-block__lang">text</span><button class="copy-code" type="button">复制</button><pre><code class="language-text">vendor/agent-core/
+<div class="code-block"><span class="code-block__lang">text</span><button class="copy-code" type="button">复制</button><pre><code class="language-text">vendor/agent-contracts/
 ├── docs/                    # 本文档站导出物
 └── crates/                  # 后续实现团队建立的公共 crate</code></pre></div>
 <p>这能避免让应用层依赖文档相对路径，也能让文档独立打包时不携带业务源码。</p>
@@ -45,10 +45,10 @@ resolver = &quot;2&quot;
 members = [&quot;crates/*&quot;]
 
 [workspace.dependencies]
-rebuild-core = { path = &quot;vendor/agent-core/crates/agent-contract&quot; }
-rebuild-llm = { path = &quot;vendor/agent-core/crates/agent-llm&quot; }
-rebuild-mcp = { path = &quot;vendor/agent-core/crates/agent-mcp&quot; }
-rebuild-store = { path = &quot;vendor/agent-core/crates/agent-store&quot; }</code></pre></div>
+rebuild-core = { path = &quot;vendor/agent-contracts/crates/agent-contract&quot; }
+rebuild-llm = { path = &quot;vendor/agent-contracts/crates/agent-llm&quot; }
+rebuild-mcp = { path = &quot;vendor/agent-contracts/crates/agent-mcp&quot; }
+rebuild-store = { path = &quot;vendor/agent-contracts/crates/agent-store&quot; }</code></pre></div>
 <div class="code-block"><span class="code-block__lang">toml</span><button class="copy-code" type="button">复制</button><pre><code class="language-toml"># crates/r-code-agent/Cargo.toml（同样适用于 Hermes 私有 crate）
 [dependencies]
 rebuild-core = { workspace = true }
@@ -75,7 +75,7 @@ rebuild-llm = { workspace = true }</code></pre></div>
 <table><thead><tr><th>合同</th><th>R-Code 侧证据</th><th>Tiny Hermes 侧证据</th></tr></thead><tbody><tr><td>ContentBlock / 工具结果配对</td><td>Agent 取消时不留下孤儿 <code>tool_use</code></td><td><code>run_turn</code> 取消后可再次请求 Provider</td></tr><tr><td>Provider stream</td><td>UI 可显示增量、usage 和错误</td><td>CLI、HTTP、IM 都消费同一事件顺序</td></tr><tr><td>ToolHost 失败默认</td><td>未知工具进入审批 / 拒绝</td><td>未知或未注入工具不能静默执行</td></tr><tr><td>Session 持久化</td><td>重启后任务事件可投影</td><td>JSONL 会话可恢复、可被反思读取</td></tr><tr><td>MCP 命名</td><td>外部工具不碰撞 Gateway 名称</td><td><code>&lt;server&gt;__&lt;tool&gt;</code> 可路由到正确 server</td></tr><tr><td>配置与秘密</td><td>诊断包不含 token</td><td><code>config.toml</code> 和 channel 凭据权限受限</td></tr></tbody></table>
 <h2 id="8-故障处理与退出条件">8. 故障处理与退出条件</h2>
 <p>发现公共合同缺陷时，不要在某一产品内临时复制修复。正确流程是：</p>
-<ol><li>记录最小复现与受影响的合同编号。</li><li>在 <code>agent-core</code> 中修正文档、版本规则和测试向量。</li><li>两端用同一向量复测；任何一端不能通过时保持旧 pin。</li><li>仅当两端均提供通过证据，才更新 submodule 引用。</li></ol>
+<ol><li>记录最小复现与受影响的合同编号。</li><li>在 <code>agent-contracts</code> 中修正文档、版本规则和测试向量。</li><li>两端用同一向量复测；任何一端不能通过时保持旧 pin。</li><li>仅当两端均提供通过证据，才更新 submodule 引用。</li></ol>
 <p>本阶段完成的定义：两个项目可以在不读取当前 R-Code 或 <code>small-rust-hermes</code> 源码的条件下，<br>仅凭本目录的 HTML 文档创建一致的公共接口、测试夹具和版本治理流程。</p></article><aside class="toc" aria-label="本页目录"></aside></main>
   <footer class="doc-footer">本页为可离线浏览的重构规范；代码示例是实现合同，不是已交付源码。</footer>
   <script src="assets/site.js"></script>

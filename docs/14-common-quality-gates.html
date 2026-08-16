@@ -4,11 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>公共层质量门禁与验收向量 · agent-core</title>
+  <title>公共层质量门禁与验收向量 · agent-contracts</title>
   <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
-  <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-core</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Core</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
+  <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-contracts</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Contracts</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
   <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="公共层质量门禁与验收向量">公共层质量门禁与验收向量</h1>
 <h2 id="1-为什么公共层需要独立门禁">1. 为什么公共层需要独立门禁</h2>
 <p>共享模块的错误会同时扩大到 R-Code 与 Tiny Hermes。公共层的质量门禁必须比单项目测试更早<br>发现“看似编译通过、语义已经分叉”的问题，例如：一个消费者把 <code>ToolResult.is_error</code> 当作<br>提示文本，另一个把它当作必须重试；或一个入口在取消时没有配对工具结果。</p>
@@ -51,7 +51,7 @@ V-COMP-01: 压缩前后的最近 user 目标、未完成工具结果、持久事
 <p>公共层不应替应用层设定 UI 帧率，但必须设定可预期的资源边界：</p>
 <ul><li>流式事件处理不得在每个 token 全量复制历史；会话追加应是线性写入。</li><li>JSONL 恢复必须支持流式读取，坏尾行不能使完整文件全部失效。</li><li>MCP server 的连接、重连和超时必须有可配置上限。</li><li>compaction 必须记录输入范围和摘要来源，不能成为不可审计的黑箱。</li><li>所有 token / 字节 / 深度限制都应在 DTO 中可观察、在错误中可解释。</li></ul>
 <h2 id="6-发布前签核清单">6. 发布前签核清单</h2>
-<ul><li><input class="task-checkbox" type="checkbox" disabled>两端均固定同一 <code>agent-core</code> tag / commit。</li><li><input class="task-checkbox" type="checkbox" disabled>最小测试向量在无网络环境下通过。</li><li><input class="task-checkbox" type="checkbox" disabled>至少一个真实 Provider 和一个 mock Provider 通过流式契约。</li><li><input class="task-checkbox" type="checkbox" disabled>至少一个 stdio MCP 和一个 HTTP MCP fixture 通过断开/超时测试。</li><li><input class="task-checkbox" type="checkbox" disabled>会话截断、配置坏值、取消配对、未知工具四类故障演练有记录。</li><li><input class="task-checkbox" type="checkbox" disabled>API、配置、JSONL 和 IPC 的破坏性变更均带迁移页与版本号。</li><li><input class="task-checkbox" type="checkbox" disabled>R-Code 与 Tiny Hermes 均已确认不存在私有类型反向渗入公共 crate。</li></ul>
+<ul><li><input class="task-checkbox" type="checkbox" disabled>两端均固定同一 <code>agent-contracts</code> tag / commit。</li><li><input class="task-checkbox" type="checkbox" disabled>最小测试向量在无网络环境下通过。</li><li><input class="task-checkbox" type="checkbox" disabled>至少一个真实 Provider 和一个 mock Provider 通过流式契约。</li><li><input class="task-checkbox" type="checkbox" disabled>至少一个 stdio MCP 和一个 HTTP MCP fixture 通过断开/超时测试。</li><li><input class="task-checkbox" type="checkbox" disabled>会话截断、配置坏值、取消配对、未知工具四类故障演练有记录。</li><li><input class="task-checkbox" type="checkbox" disabled>API、配置、JSONL 和 IPC 的破坏性变更均带迁移页与版本号。</li><li><input class="task-checkbox" type="checkbox" disabled>R-Code 与 Tiny Hermes 均已确认不存在私有类型反向渗入公共 crate。</li></ul>
 <p>通过本清单仅说明公共合同可供产品接入；产品本身的可用性、安全和发布仍必须分别通过<br>R-Code / Tiny Hermes 文档站的质量门禁。</p></article><aside class="toc" aria-label="本页目录"></aside></main>
   <footer class="doc-footer">本页为可离线浏览的重构规范；代码示例是实现合同，不是已交付源码。</footer>
   <script src="assets/site.js"></script>

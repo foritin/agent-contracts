@@ -1,4 +1,4 @@
-//! `agent-contract` -- agent-core 核心抽象。
+//! `agent-contract` -- agent-contracts 核心抽象。
 //!
 //! 定义 Agent 对话中的消息、内容块、角色、会话数据模型，以及 Provider /
 //! ToolHost / CompactionStrategy 等 trait 契约。所有公共 crate 建立在本 crate

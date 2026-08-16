@@ -17,7 +17,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
-repository = "https://github.com/foritin/agent-core"
+repository = "https://github.com/foritin/agent-contracts"
 authors = ["R-Code & Tiny Hermes shared team"]
 
 [workspace.dependencies]

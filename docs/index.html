@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Agent Core 共享模块重构文档 · agent-core</title>
+  <title>Agent Contracts 共享模块重构文档 · agent-contracts</title>
   <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
-  <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-core</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Core</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
-  <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="agent-core-共享模块重构文档">Agent Core 共享模块重构文档</h1>
+  <header class="site-header"><div class="site-header__inner"><a class="brand" href="index.html">agent-contracts</a><nav class="site-nav" aria-label="重构文档站"><a href="index.html" aria-current="page">Agent Contracts</a><a href="../r-code/index.html">R-Code</a><a href="../tiny-hermes/index.html">Tiny Hermes</a></nav></div></header>
+  <main class="page-grid"><article class="doc-content"><div class="doc-meta">离线 HTML 重构文档</div><h1 id="agent-contracts-共享模块重构文档">Agent Contracts 共享模块重构文档</h1>
 <p>本目录包含 R-Code 与 Tiny Hermes 共享的模块重构文档。<br>这些模块可被两个项目共同引用，避免重复设计与实现；页面可离线打开，也可作为独立 Git submodule 固定版本。</p>
 <hr>
 <h2 id="模块索引">模块索引</h2>
@@ -53,12 +53,12 @@
 <hr>
 <h2 id="使用方式">使用方式</h2>
 <h3 id="作为-git-submodule-嵌入-推荐">作为 git submodule 嵌入（推荐）</h3>
-<p><code>agent-core</code> 设计为独立仓库，以 git submodule 形式嵌入 R-Code（R-Code）与 Tiny Hermes：</p>
+<p><code>agent-contracts</code> 设计为独立仓库，以 git submodule 形式嵌入 R-Code（R-Code）与 Tiny Hermes：</p>
 <div class="code-block"><span class="code-block__lang">bash</span><button class="copy-code" type="button">复制</button><pre><code class="language-bash"># 在 R-Code（R-Code）项目根
-r-code/ $ git submodule add &lt;agent-core-repo-url&gt; vendor/agent-core
+r-code/ $ git submodule add &lt;agent-contracts-repo-url&gt; vendor/agent-contracts
 
 # 在 Tiny Hermes 项目根
-tiny-hermes/ $ git submodule add &lt;agent-core-repo-url&gt; vendor/agent-core
+tiny-hermes/ $ git submodule add &lt;agent-contracts-repo-url&gt; vendor/agent-contracts
 
 # 克隆时带上子模块
 git clone --recurse-submodules &lt;r-code-or-hermes-url&gt;</code></pre></div>
@@ -67,9 +67,9 @@ git clone --recurse-submodules &lt;r-code-or-hermes-url&gt;</code></pre></div>
 [workspace]
 resolver = &quot;2&quot;
 members = [
-    &quot;vendor/agent-core/crates/agent-contract&quot;,
-    &quot;vendor/agent-core/crates/agent-llm&quot;,
-    &quot;vendor/agent-core/crates/agent-mcp&quot;,
+    &quot;vendor/agent-contracts/crates/agent-contract&quot;,
+    &quot;vendor/agent-contracts/crates/agent-llm&quot;,
+    &quot;vendor/agent-contracts/crates/agent-mcp&quot;,
     # ... 其他公共 crate
     &quot;crates/r-code-core&quot;,
     &quot;crates/r-code-gateway&quot;,
@@ -79,8 +79,8 @@ members = [
 [workspace]
 resolver = &quot;2&quot;
 members = [
-    &quot;vendor/agent-core/crates/agent-contract&quot;,
-    &quot;vendor/agent-core/crates/agent-llm&quot;,
+    &quot;vendor/agent-contracts/crates/agent-contract&quot;,
+    &quot;vendor/agent-contracts/crates/agent-llm&quot;,
     # ... 其他公共 crate
     &quot;crates/hermes-turn&quot;,
     &quot;crates/hermes-tools&quot;,
@@ -95,9 +95,9 @@ agent-contract = { workspace = true }</code></pre></div>
 <ul><li><strong>compaction / config / error 不是独立 crate</strong>：在现有 <code>small-rust-hermes</code> 中，<br>它们内聚在 <code>agent-contract</code>（compaction/error）和 <code>agent-llm</code>（config）。 本文档集为清晰起见<strong>分篇描述</strong>，重构时可选择保持内聚或拆分为独立 crate， 两者均可，<a href="11-crate-mapping.html"><code>11-crate-mapping.html</code></a> 给出了推荐划分。</li><li><strong>hermes-turn / hermes-tools / hermes-server 属 Hermes 特有</strong>：<br>turn 编排是 Hermes 的执行引擎（详见 <a href="../tiny-hermes/09-turn-orchestration.html">Tiny Hermes 的 Turn 编排</a>）， 不在公共层；R-Code（R-Code）有自己的 Agent Runtime（Pi adapter + 任务状态机）。</li></ul>
 <hr>
 <h2 id="下游重构链路">下游重构链路</h2>
-<p><strong>Agent Core 是两个产品包的上游依赖。</strong>它不是可选的背景材料，而是 Provider、会话、工具、消息、配置、错误、进程边界和质量门的唯一共享来源。先完成本包 P0–P15，再选择 R-Code（R-Code）或 Tiny Hermes 的产品链路。</p>
+<p><strong>Agent Contracts 是两个产品包的上游依赖。</strong>它不是可选的背景材料，而是 Provider、会话、工具、消息、配置、错误、进程边界和质量门的唯一共享来源。先完成本包 P0–P15，再选择 R-Code（R-Code）或 Tiny Hermes 的产品链路。</p>
 <div class="dependency-chain">
-<span class="dependency-label">P0–P15 Agent Core</span><span class="dependency-label">C0–C19 R-Code</span><span class="dependency-label">H0–H15 Tiny Hermes</span>
+<span class="dependency-label">P0–P15 Agent Contracts</span><span class="dependency-label">C0–C19 R-Code</span><span class="dependency-label">H0–H15 Tiny Hermes</span>
 <ol>
 <li><strong>公共层：</strong>从 <a href="00-overview.html">总览</a> 到 <a href="15-document-boundary-and-traceability.html">文档边界与追溯</a>，产出稳定的版本化合同与可验证质量门。</li>
 <li><strong>R-Code（R-Code）路线：</strong>进入 <a href="../r-code/index.html">R-Code HTML 文档站</a>，按 <a href="../r-code/19-reconstruction-runbook.html">重构运行手册</a> 落地桌面工作区、Agent、工具网关、服务层、验收和发布。</li>
@@ -108,7 +108,7 @@ agent-contract = { workspace = true }</code></pre></div>
 <tr><td>R-Code（R-Code）</td><td><a href="../r-code/16-product-scope-and-acceptance.html">产品范围与验收</a></td><td>以公共 API、IPC、Tool Host 与质量门实现 Electron 产品专有服务。</td><td>产品验收、端到端测试、签名/发布和运行运维记录。</td></tr>
 <tr><td>Tiny Hermes</td><td><a href="../tiny-hermes/00-overview.html">产品总览</a></td><td>以公共 Provider、消息、会话、工具和错误合同实现 Rust 多通道代理。</td><td>crate 测试、渠道契约、发布包、告警与回滚演练记录。</td></tr>
 </tbody></table>
-<p>三包离线交付时，保持以下同级结构并从本页开始：<code>rebuild-delivery/agent-core/</code>、<code>rebuild-delivery/r-code/</code>、<code>rebuild-delivery/tiny-hermes/</code>。如使用 Git 子模块，具体固定版本、workspace 解析、升级和回滚步骤以 <a href="13-submodule-and-workspace-integration.html">子模块与 workspace 集成</a> 为准。</p>
+<p>三包离线交付时，保持以下同级结构并从本页开始：<code>rebuild-delivery/agent-contracts/</code>、<code>rebuild-delivery/r-code/</code>、<code>rebuild-delivery/tiny-hermes/</code>。如使用 Git 子模块，具体固定版本、workspace 解析、升级和回滚步骤以 <a href="13-submodule-and-workspace-integration.html">子模块与 workspace 集成</a> 为准。</p>
 <p><strong>HTML-only 边界：</strong>这三个目录中的重构规范和引用资料均以 <code>.html</code> 提供。本文档中若展示 <code>README.md</code>、<code>SKILL.md</code> 或项目内 <code>docs/*.md</code>，它们是在说明最终产品需要处理的用户文件格式，绝不是交付包外的说明文档依赖。</p>
 <h2 id="许可">许可</h2>
 <p>公共模块采用 MIT 许可，允许两个项目自由使用。</p></article><aside class="toc" aria-label="本页目录"></aside></main>

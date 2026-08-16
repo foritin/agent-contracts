@@ -1,4 +1,4 @@
-//! `agent-error` —— agent-core 共享错误类型。
+//! `agent-error` —— agent-contracts 共享错误类型。
 //!
 //! 基于 `thiserror` 定义统一 `Error` 枚举，支持跨模块传播与上下文携带。
 //! 所有公共 crate 统一返回 `Result<T, Error>`，避免错误语义分叉。
