@@ -13,7 +13,7 @@
 <h2 id="1-概述">1. 概述</h2>
 <p>定义统一的 LLM Provider trait，支持多模型后端（Anthropic Claude、DeepSeek、OpenAI 兼容 API）。</p>
 <h2 id="2-trait-定义">2. Trait 定义</h2>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-core/src/provider.rs
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// agent-contract/src/provider.rs
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
@@ -72,7 +72,7 @@ pub struct Usage {
 }</code></pre></div>
 <h2 id="4-provider-实现">4. Provider 实现</h2>
 <h3 id="4-1-anthropic-provider">4.1 Anthropic Provider</h3>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-llm/src/anthropic.rs
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// agent-llm/src/anthropic.rs
 
 pub struct AnthropicProvider {
     client: reqwest::Client,
@@ -100,7 +100,7 @@ impl LlmProvider for AnthropicProvider {
     }
 }</code></pre></div>
 <h3 id="4-2-openai-兼容-provider">4.2 OpenAI 兼容 Provider</h3>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-llm/src/openai.rs
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// agent-llm/src/openai.rs
 
 pub struct OpenAiProvider {
     client: reqwest::Client,
@@ -126,7 +126,7 @@ impl LlmProvider for OpenAiProvider {
     }
 }</code></pre></div>
 <h3 id="4-3-deepseek-provider">4.3 DeepSeek Provider</h3>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-llm/src/deepseek.rs
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// agent-llm/src/deepseek.rs
 
 pub struct DeepSeekProvider {
     inner: OpenAiProvider,  // DeepSeek 兼容 OpenAI API
@@ -144,7 +144,7 @@ impl DeepSeekProvider {
     }
 }</code></pre></div>
 <h2 id="5-provider-工厂">5. Provider 工厂</h2>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-llm/src/lib.rs
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// agent-llm/src/lib.rs
 
 pub enum ProviderConfig {
     Anthropic {
@@ -207,8 +207,8 @@ fn apply_prompt_caching(&amp;self, request: &amp;mut AnthropicRequest) {
     }
 }</code></pre></div>
 <h2 id="8-使用示例">8. 使用示例</h2>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">use hermes_llm::{ProviderConfig, create_provider};
-use hermes_core::{CompletionRequest, Message};
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">use agent_llm::{ProviderConfig, create_provider};
+use agent_contract::{CompletionRequest, Message};
 
 #[tokio::main]
 async fn main() -&gt; Result&lt;()&gt; {

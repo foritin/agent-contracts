@@ -1,0 +1,15 @@
+[package]
+name = "agent-error"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Shared error types for agent-core (thiserror-based, cross-module propagation)"
+
+[dependencies]
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+toml = { workspace = true }

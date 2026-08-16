@@ -45,10 +45,10 @@ resolver = &quot;2&quot;
 members = [&quot;crates/*&quot;]
 
 [workspace.dependencies]
-rebuild-core = { path = &quot;vendor/agent-core/crates/hermes-core&quot; }
-rebuild-llm = { path = &quot;vendor/agent-core/crates/hermes-llm&quot; }
-rebuild-mcp = { path = &quot;vendor/agent-core/crates/hermes-mcp&quot; }
-rebuild-store = { path = &quot;vendor/agent-core/crates/hermes-store&quot; }</code></pre></div>
+rebuild-core = { path = &quot;vendor/agent-core/crates/agent-contract&quot; }
+rebuild-llm = { path = &quot;vendor/agent-core/crates/agent-llm&quot; }
+rebuild-mcp = { path = &quot;vendor/agent-core/crates/agent-mcp&quot; }
+rebuild-store = { path = &quot;vendor/agent-core/crates/agent-store&quot; }</code></pre></div>
 <div class="code-block"><span class="code-block__lang">toml</span><button class="copy-code" type="button">复制</button><pre><code class="language-toml"># crates/r-code-agent/Cargo.toml（同样适用于 Hermes 私有 crate）
 [dependencies]
 rebuild-core = { workspace = true }
@@ -67,7 +67,7 @@ rebuild-llm = { workspace = true }</code></pre></div>
   &quot;commit&quot;: &quot;&lt;immutable-commit&gt;&quot;,
   &quot;validatedBy&quot;: {
     &quot;r-code&quot;: &quot;cargo test -p r-code-contract-tests&quot;,
-    &quot;tinyHermes&quot;: &quot;cargo test -p hermes-contract-tests&quot;
+    &quot;tinyHermes&quot;: &quot;cargo test -p agent-contract-tests&quot;
   }
 }</code></pre></div>
 <h2 id="7-跨项目契约测试">7. 跨项目契约测试</h2>

@@ -1,25 +1,26 @@
 {
-  "publicContract": "v0.2.0",
+  "publicContract": "v0.3.0",
   "commit": "0a8a5ef2e05c3b9d828c30b2767162b71b5481d2",
   "commitNote": "本合同最后一次被验证时的 agent-core 提交。它不是 CI 的 pin 依据——真正的 pin 是父仓记录的 gitlink，见 r-code 的 .github/workflows/ci.yml submodule-pin。改完 agent-core 后把这里刷成新的 HEAD 即可，落后一格不会导致 CI 失败。",
   "changelog": [
-    "v0.2.0 - hermes-config: ProviderConfig 新增可选字段 protocol（线路协议，由用户显式选择）。按 versionPolicy 属 minor：老配置缺该字段时 serde default 为 None，消费者需自行决定回退策略。"
+    "v0.3.0 - 公共 crate 统一改名 hermes-* → agent-*（hermes-core → agent-contract）。属 major：crate 名与 import 路径变更，R-Code / Tiny Hermes 必须同步迁移；无类型或事件语义变化。",
+    "v0.2.0 - agent-config: ProviderConfig 新增可选字段 protocol（线路协议，由用户显式选择）。按 versionPolicy 属 minor：老配置缺该字段时 serde default 为 None，消费者需自行决定回退策略。"
   ],
   "crates": [
-    "hermes-error",
-    "hermes-core",
-    "hermes-llm",
-    "hermes-mcp",
-    "hermes-store",
-    "hermes-config",
-    "hermes-compaction",
-    "hermes-ipc",
-    "hermes-tauri"
+    "agent-error",
+    "agent-contract",
+    "agent-llm",
+    "agent-mcp",
+    "agent-store",
+    "agent-config",
+    "agent-compaction",
+    "agent-ipc",
+    "agent-tauri"
   ],
   "validatedBy": {
     "agentCore": "cargo test --workspace",
     "r-code": "cargo test -p r-code-core -p r-code-store",
-    "tinyHermes": "cargo test -p hermes-contract-tests"
+    "tinyHermes": "cargo test -p agent-contract-tests"
   },
   "qualityGates": {
     "fmt": "cargo fmt --all -- --check",

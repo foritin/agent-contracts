@@ -44,7 +44,7 @@
 <h2 id="3-传输帧格式">3. 传输帧格式</h2>
 <div class="code-block"><span class="code-block__lang">text</span><button class="copy-code" type="button">复制</button><pre><code class="language-text">[4 bytes: payload length (big-endian u32)][N bytes: JSON payload]</code></pre></div>
 <h2 id="4-服务端实现">4. 服务端实现</h2>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-ipc/src/server.rs
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// agent-ipc/src/server.rs
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -188,7 +188,7 @@ impl IpcServer {
     }
 }</code></pre></div>
 <h2 id="5-客户端实现">5. 客户端实现</h2>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-ipc/src/client.rs
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// agent-ipc/src/client.rs
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

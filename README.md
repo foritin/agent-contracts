@@ -7,15 +7,15 @@ R-Code（桌面 Agentic IDE）与 Tiny Hermes（自进化 AI Agent）共享的�
 
 | Crate | 说明 | 依赖 |
 |-------|------|------|
-| `hermes-error` | 统一错误类型（thiserror） | 无 |
-| `hermes-core` | 核心抽象：Message/ContentBlock/Session + Provider/ToolHost/Compaction trait | hermes-error |
-| `hermes-llm` | LLM Provider 实现：Anthropic / OpenAI / DeepSeek / Mock | hermes-core |
-| `hermes-mcp` | MCP 客户端：stdio + Streamable HTTP，聚合 ToolHost | hermes-core |
-| `hermes-store` | JSONL 会话持久化 + 崩溃恢复 + 归档 | hermes-core |
-| `hermes-config` | TOML 配置 + 环境变量覆盖 + 秘密脱敏 | hermes-error |
-| `hermes-compaction` | 上下文压缩：滑动窗口 / LLM 摘要 / 智能选择 | hermes-core |
-| `hermes-ipc` | JSON-RPC 2.0 over Unix Socket / Named Pipe | hermes-core |
-| `hermes-tauri` | Tauri 应用壳状态与事件（运行时无关核心） | hermes-core/config/store/mcp |
+| `agent-error` | 统一错误类型（thiserror） | 无 |
+| `agent-contract` | 核心抽象：Message/ContentBlock/Session + Provider/ToolHost/Compaction trait | agent-error |
+| `agent-llm` | LLM Provider 实现：Anthropic / OpenAI / DeepSeek / Mock | agent-contract |
+| `agent-mcp` | MCP 客户端：stdio + Streamable HTTP，聚合 ToolHost | agent-contract |
+| `agent-store` | JSONL 会话持久化 + 崩溃恢复 + 归档 | agent-contract |
+| `agent-config` | TOML 配置 + 环境变量覆盖 + 秘密脱敏 | agent-error |
+| `agent-compaction` | 上下文压缩：滑动窗口 / LLM 摘要 / 智能选择 | agent-contract |
+| `agent-ipc` | JSON-RPC 2.0 over Unix Socket / Named Pipe | agent-contract |
+| `agent-tauri` | Tauri 应用壳状态与事件（运行时无关核心） | agent-contract/config/store/mcp |
 
 ## 快速验证
 
@@ -48,7 +48,7 @@ resolver = "2"
 members = ["vendor/agent-core/crates/*", "crates/*"]
 
 [workspace.dependencies]
-hermes-core = { path = "vendor/agent-core/crates/hermes-core" }
+agent-contract = { path = "vendor/agent-core/crates/agent-contract" }
 # ... 其他公共 crate
 ```
 
@@ -58,7 +58,7 @@ hermes-core = { path = "vendor/agent-core/crates/hermes-core" }
 
 1. **Trait 优先**：所有抽象通过 Rust trait 定义，实现可替换。
 2. **零成本抽象**：泛型 + 静态分发。
-3. **错误统一**：`hermes_error::Error` 跨模块传播。
+3. **错误统一**：`agent_error::Error` 跨模块传播。
 4. **异步优先**：Tokio 运行时。
 5. **序列化友好**：serde 支持 JSON/TOML。
 
@@ -74,11 +74,12 @@ hermes-core = { path = "vendor/agent-core/crates/hermes-core" }
 
 ## 迁移记录
 
-每个 `major` 版本破坏性变更在此登记迁移说明。当前为初始版本，无破坏性变更。
+每个 `major` 版本破坏性变更在此登记迁移说明。
 
 | 版本 | 变更类型 | 影响 | 迁移说明 |
 |------|----------|------|----------|
 | 0.1.0 | 初始发布 | — | 首个公共层合同：消息/Provider/ToolHost/MCP/会话/配置/错误/IPC/压缩。 |
+| 0.3.0 | 破坏性改名 | crate 名与 import 路径 | `hermes-*` → `agent-*`（`hermes-core` → `agent-contract`），两端同步更新依赖名与 `use` 路径；无类型语义变化。 |
 
 **向前兼容策略**（无需迁移）：
 - `ContentBlock` / `SessionEvent` / `ServerSpec` 等使用 tagged enum + 可选字段，旧实现读取含未知字段的数据不崩溃。

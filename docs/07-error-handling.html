@@ -13,7 +13,7 @@
 <h2 id="1-概述">1. 概述</h2>
 <p>统一的错误处理体系，使用 <code>thiserror</code> 定义错误类型，<br>支持跨模块传播和上下文携带。</p>
 <h2 id="2-错误类型定义">2. 错误类型定义</h2>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-core/src/error.rs
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// agent-contract/src/error.rs
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

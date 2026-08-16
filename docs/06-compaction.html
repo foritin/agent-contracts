@@ -13,7 +13,7 @@
 <h2 id="1-概述">1. 概述</h2>
 <p>当对话过长超出 LLM 上下文窗口时，自动压缩历史消息。<br>支持多种压缩策略：摘要、滑动窗口、智能选择。</p>
 <h2 id="2-trait-定义">2. Trait 定义</h2>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-core/src/compaction.rs
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// agent-contract/src/compaction.rs
 
 #[async_trait]
 pub trait CompactionStrategy: Send + Sync {

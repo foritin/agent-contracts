@@ -168,8 +168,8 @@
 
     <div class="diagram">
       <pre>依赖与并行关系总览（→ 串行依赖，∥ 可并行）
-                            ┌─ hermes-error ─┐
- P0 基础层  ────────────── ∥  hermes-core DTO │  (无依赖，三者并行启动)
+                            ┌─ agent-error ─┐
+ P0 基础层  ────────────── ∥  agent-contract DTO │  (无依赖，三者并行启动)
         │                  └─────────────────┘
         ▼ (Message/Role 冻结)
  P1 Provider ── trait 冻结 ──┬─∥ AnthropicProvider
@@ -181,8 +181,8 @@
         │                         ├─∥ MCP stdio 传输
         │                         ├─∥ MCP HTTP 传输
         │                         └── McpToolHost 聚合(依赖 server)
-        ▼ (hermes-error 就绪)
- P3 配置/存储/压缩 ──┬─∥ hermes-config(依赖 error)
+        ▼ (agent-error 就绪)
+ P3 配置/存储/压缩 ──┬─∥ agent-config(依赖 error)
                      ├─∥ SessionStore JSONL
                      ├─∥ recover/archive
                      └─∥ CompactionStrategy ×3(滑动窗口/LLM摘要/智能)
@@ -200,28 +200,28 @@
     <details class="phase" open data-phase="P0">
       <summary><span class="chev">▶</span><h2><span class="tag tag--p">P0</span> 基础类型与错误层（地基）</h2><span class="count" data-count></span></summary>
       <div class="phase__body">
-        <p class="note"><b>串行前置</b>：无（起点）。<b>可并行</b>：<code>hermes-error</code>、<code>hermes-core</code> 的 Message / Session DTO 三者无相互依赖，可同时启动。<b>来源</b>：04-message-types、07-error-handling、02-session-management。</p>
+        <p class="note"><b>串行前置</b>：无（起点）。<b>可并行</b>：<code>agent-error</code>、<code>agent-contract</code> 的 Message / Session DTO 三者无相互依赖，可同时启动。<b>来源</b>：04-message-types、07-error-handling、02-session-management。</p>
         <div class="group" data-group="impl-p0">
           <h3>0.1 工作区骨架 <span class="tag tag--serial">串行</span> <span class="count"></span></h3>
           <div class="task"><input type="checkbox" data-id="impl-p0-skeleton" checked><div class="task__main"><div class="task__label">创建 <code>agent-core/Cargo.toml</code> workspace（resolver="2"），登记成员 crate</div><div class="task__meta">对应 <code>11-crate-mapping</code> 工作区结构；先空壳后填充</div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p0-ci" checked><div class="task__main"><div class="task__label">建立 CI 基线：<code>cargo fmt --check</code> / <code>cargo clippy -D warnings</code> / <code>cargo test</code></div><div class="task__meta">静态质量门先行，见 14 篇「静态」层</div></div></div>
         </div>
         <div class="group" data-group="impl-p0">
-          <h3>0.2 hermes-error <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <h3>0.2 agent-error <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
           <div class="deps"><b>依赖</b>：无</div>
           <div class="task"><input type="checkbox" data-id="impl-p0-error-enum" checked><div class="task__main"><div class="task__label">定义统一 <code>Error</code> 枚举（thiserror），覆盖会话/Provider/工具/MCP/配置/存储/序列化/IPC/压缩等类别</div><div class="task__meta"><code>07-error-handling §2</code>；含 <code>#[from]</code> 转换 io/json/yaml/toml</div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p0-error-ctx" checked><div class="task__main"><div class="task__label">实现 <code>ErrorContext</code> + <code>ResultExt</code>（with_session / with_tool）携带上下文</div><div class="task__meta"><code>07 §3</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p0-error-recovery" checked><div class="task__main"><div class="task__label">编写错误恢复策略映射表（RateLimited 退避 / McpNotConnected 重连 等）</div><div class="task__meta"><code>07 §4</code>；仅文档化策略，实现分散到各模块</div></div></div>
         </div>
         <div class="group" data-group="impl-p0">
-          <h3>0.3 hermes-core：消息类型 <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <h3>0.3 agent-contract：消息类型 <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
           <div class="deps"><b>依赖</b>：无</div>
           <div class="task"><input type="checkbox" data-id="impl-p0-role" checked><div class="task__main"><div class="task__label"><code>Role</code> 仅 User / Assistant；system 不作为角色，置于 <code>CompletionRequest.system</code></div><div class="task__meta"><code>04 §2</code>；与 Anthropic API 一致，Provider 适配层负责转 OpenAI system role</div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p0-contentblock" checked><div class="task__main"><div class="task__label"><code>ContentBlock</code> 枚举：Text / Thinking / ToolUse / ToolResult / Image / Custom（产品扩展钩子，不含产品专属类型）</div><div class="task__meta"><code>04 §3</code>；<code>#[serde(tag="type", rename_all="snake_case")]</code>；产品专属块走 Custom 透传</div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p0-msg-helpers" checked><div class="task__main"><div class="task__label">实现 Message / ContentBlock 工具方法：user_text、assistant_text、as_text、is_tool_use、tool_name、tool_id、text_content、tool_uses、estimate_tokens</div><div class="task__meta"><code>04 §4 §6</code>；token 估算 len/4</div></div></div>
         </div>
         <div class="group" data-group="impl-p0">
-          <h3>0.4 hermes-core：会话数据模型 <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <h3>0.4 agent-contract：会话数据模型 <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
           <div class="deps"><b>依赖</b>：Message 类型（0.3）</div>
           <div class="task"><input type="checkbox" data-id="impl-p0-sessionmeta" checked><div class="task__main"><div class="task__label"><code>SessionMeta</code>（id/created_at/model/provider/title）作为 JSONL 第一行</div><div class="task__meta"><code>02 §2</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p0-sessionevent" checked><div class="task__main"><div class="task__label"><code>SessionEvent</code> tagged enum：Meta / Message / Usage / ToolCall / ToolResult / System</div><div class="task__meta"><code>02 §2</code>；注意 <code>12-api-contracts §2.2</code> 中 ToolResult 含 is_error 字段</div></div></div>
@@ -238,7 +238,7 @@
         <p class="note"><b>串行前置</b>：P0 的 Message/ContentBlock 冻结。<b>可并行</b>：trait 冻结后，四个 Provider 实现并行。<b>来源</b>：01-llm-provider、12-api-contracts §1。</p>
         <div class="group" data-group="impl-p1">
           <h3>1.1 Provider trait 与 DTO <span class="tag tag--serial">串行</span> <span class="count"></span></h3>
-          <div class="deps"><b>依赖</b>：hermes-core Message</div>
+          <div class="deps"><b>依赖</b>：agent-contract Message</div>
           <div class="task"><input type="checkbox" data-id="impl-p1-trait" checked><div class="task__main"><div class="task__label"><code>LlmProvider</code> trait：complete / stream / capabilities / name（async_trait, Send+Sync）</div><div class="task__meta"><code>01 §2</code>、<code>12 §1.1</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p1-dto" checked><div class="task__main"><div class="task__label">定义 CompletionRequest / CompletionResponse / StreamEvent / StopReason / Usage</div><div class="task__meta"><code>01 §3</code>；StreamEvent 含 TextDelta/ToolUseStart/ToolUseDelta/ToolUseComplete/Stop/Usage</div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p1-cap" checked><div class="task__main"><div class="task__label"><code>Capabilities</code> 能力协商（streaming/tool_use/vision/prompt_caching/max_context_tokens）+ can_use_tools / cache_key</div><div class="task__meta"><code>01 §6</code></div></div></div>
@@ -268,7 +268,7 @@
         <p class="note"><b>串行前置</b>：P0。<b>可并行</b>：trait 冻结后，stdio / HTTP 传输并行。<b>来源</b>：03-tool-host、05-mcp-client、12 §3 §4。</p>
         <div class="group" data-group="impl-p2">
           <h3>2.1 ToolHost 抽象 <span class="tag tag--serial">串行</span> <span class="count"></span></h3>
-          <div class="deps"><b>依赖</b>：hermes-core</div>
+          <div class="deps"><b>依赖</b>：agent-contract</div>
           <div class="task"><input type="checkbox" data-id="impl-p2-trait" checked><div class="task__main"><div class="task__label"><code>ToolHost</code> trait：list_tools / call / call_batch（默认串行实现）</div><div class="task__meta"><code>03 §2</code>、<code>12 §3.1</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p2-spec" checked><div class="task__main"><div class="task__label"><code>ToolSpec</code>（name/description/input_schema/source/requires_confirmation）+ <code>ToolSource</code> + <code>ToolCallOutcome</code></div><div class="task__meta"><code>03 §2</code>；<code>requires_confirmation</code> 默认 true（14 篇兼容性表）</div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p2-null-composite" checked><div class="task__main"><div class="task__label">实现 <code>NullToolHost</code>（空实现，拒绝调用）与 <code>CompositeToolHost</code>（按优先级查找）</div><div class="task__meta"><code>03 §3 §6</code></div></div></div>
@@ -295,26 +295,26 @@
     <details class="phase" data-phase="P3">
       <summary><span class="chev">▶</span><h2><span class="tag tag--p">P3</span> 配置 / 存储 / 压缩</h2><span class="count" data-count></span></summary>
       <div class="phase__body">
-        <p class="note"><b>串行前置</b>：hermes-error 就绪（config 依赖）。<b>可并行</b>：config / store / compaction 三线并行。<b>来源</b>：08-config、02-session、06-compaction。</p>
+        <p class="note"><b>串行前置</b>：agent-error 就绪（config 依赖）。<b>可并行</b>：config / store / compaction 三线并行。<b>来源</b>：08-config、02-session、06-compaction。</p>
         <div class="group" data-group="impl-p3">
-          <h3>3.1 hermes-config <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
-          <div class="deps"><b>依赖</b>：hermes-error</div>
+          <h3>3.1 agent-config <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：agent-error</div>
           <div class="task"><input type="checkbox" data-id="impl-p3-struct" checked><div class="task__main"><div class="task__label"><code>Config</code> 结构：default_provider/log_level/providers/mcp_servers/storage/compaction/tauri</div><div class="task__meta"><code>08 §3</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p3-load" checked><div class="task__main"><div class="task__label"><code>load()</code> 优先级链：默认值 &lt; 文件 &lt; 环境变量 &lt; 显式参数；<code>validate()</code> 校验默认 provider / api_key 非空 / 存储目录可写</div><div class="task__meta"><code>08 §4</code>、<code>14 V-CFG-01</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p3-defaults" checked><div class="task__main"><div class="task__label">默认值函数：provider=anthropic / log=info / compaction=auto / max_context=180000 / trigger=0.8 / theme=system / font=13</div><div class="task__meta"><code>08 §5</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p3-secret" checked><div class="task__main"><div class="task__label">秘密脱敏：Debug / 错误 / 支持包输出不含 api_key/authorization/cookie/token</div><div class="task__meta"><code>14 V-CFG-02</code></div></div></div>
         </div>
         <div class="group" data-group="impl-p3">
-          <h3>3.2 hermes-store：JSONL 会话存储 <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
-          <div class="deps"><b>依赖</b>：hermes-core Session 模型</div>
+          <h3>3.2 agent-store：JSONL 会话存储 <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：agent-contract Session 模型</div>
           <div class="task"><input type="checkbox" data-id="impl-p3-crud" checked><div class="task__main"><div class="task__label"><code>SessionStore</code>：create / append / load / list（按 created_at 倒序）</div><div class="task__meta"><code>02 §3</code>、<code>12 §5.1</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p3-recover" checked><div class="task__main"><div class="task__label"><code>recover()</code>：检测末尾换行，截断不完整行后重写并重载</div><div class="task__meta"><code>02 §4</code>、<code>14 V-STORE-01</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p3-archive" checked><div class="task__main"><div class="task__label"><code>archive()</code>：gzip 压缩为 <code>.jsonl.gz</code> 后删除原文件</div><div class="task__meta"><code>02 §5</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p3-atomic" checked><div class="task__main"><div class="task__label">原子写入：写临时文件 + rename，中断后旧/新文件二选一完整可读</div><div class="task__meta"><code>14 V-STORE-02</code></div></div></div>
         </div>
         <div class="group" data-group="impl-p3">
-          <h3>3.3 hermes-compaction <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
-          <div class="deps"><b>依赖</b>：hermes-core（trait）；LlmSummaryCompaction 依赖 Provider（P1）</div>
+          <h3>3.3 agent-compaction <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：agent-contract（trait）；LlmSummaryCompaction 依赖 Provider（P1）</div>
           <div class="task"><input type="checkbox" data-id="impl-p3-cmp-trait" checked><div class="task__main"><div class="task__label"><code>CompactionStrategy</code> trait：should_compact / compact / name</div><div class="task__meta"><code>06 §2</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p3-sliding" checked><div class="task__main"><div class="task__label"><code>SlidingWindowCompaction</code>：保留前 N + 后 N，中间插占位符；80% 阈值触发</div><div class="task__meta"><code>06 §3.1</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p3-llmsummary" checked><div class="task__main"><div class="task__label"><code>LlmSummaryCompaction</code>：前半段调 Provider 生成摘要，保留后半段</div><div class="task__meta"><code>06 §3.2</code></div></div></div>
@@ -331,16 +331,16 @@
       <div class="phase__body">
         <p class="note"><b>串行前置</b>：P0–P3。<b>可并行</b>：IPC 与 Tauri 双线。<b>来源</b>：09-ipc、10-tauri、12 §6 §9。IPC 用于桌面主进程与 Worker 通信；服务端产品可用 HTTP/WS（非公共层）。Tauri 命令注册需 <code>tauri</code> 运行时，属产品层。</p>
         <div class="group" data-group="impl-p4">
-          <h3>4.1 hermes-ipc <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
-          <div class="deps"><b>依赖</b>：hermes-core</div>
+          <h3>4.1 agent-ipc <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：agent-contract</div>
           <div class="task"><input type="checkbox" data-id="impl-p4-protocol" checked><div class="task__main"><div class="task__label">JSON-RPC 2.0 协议 + 帧格式（4B big-endian 长度头 + JSON payload）</div><div class="task__meta"><code>09 §2 §3</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p4-server" checked><div class="task__main"><div class="task__label"><code>IpcServer</code>：Unix Socket（权限 0o600）/ Windows Named Pipe；register + serve + handle_connection</div><div class="task__meta"><code>09 §4 §6</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p4-client" checked><div class="task__main"><div class="task__label"><code>IpcClient</code>：connect + call + 接收循环（oneshot 分发），超时映射 IpcTimeout</div><div class="task__meta"><code>09 §5</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p4-handshake" checked><div class="task__main"><div class="task__label">版本握手：method/params 带版本，不兼容返回明确错误</div><div class="task__meta"><code>14 §4 兼容性表</code></div></div></div>
         </div>
         <div class="group" data-group="impl-p4">
-          <h3>4.2 hermes-tauri 运行时无关核心（命令注册属产品层，不在本清单） <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
-          <div class="deps"><b>依赖</b>：hermes-core + hermes-config</div>
+          <h3>4.2 agent-tauri 运行时无关核心（命令注册属产品层，不在本清单） <span class="tag tag--parallel">并行</span> <span class="count"></span></h3>
+          <div class="deps"><b>依赖</b>：agent-contract + agent-config</div>
           <div class="task"><input type="checkbox" data-id="impl-p4-state" checked><div class="task__main"><div class="task__label"><code>AppState</code>：init 组装 config/session_store/tool_host/event_sender（broadcast 256）</div><div class="task__meta"><code>10 §3</code></div></div></div>
           <div class="task"><input type="checkbox" data-id="impl-p4-events" checked><div class="task__main"><div class="task__label"><code>AppEvent</code> 推送：TextDelta / ToolUse / ToolResult / MessageComplete / Error / SessionChanged / ConfigUpdated</div><div class="task__meta"><code>10 §5</code></div></div></div>
         </div>

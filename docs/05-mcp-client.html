@@ -24,7 +24,7 @@ type = &quot;http&quot;
 url = &quot;https://api.github.com/mcp&quot;
 Authorization = &quot;Bearer ${GITHUB_TOKEN}&quot;</code></pre></div>
 <h2 id="3-配置解析">3. 配置解析</h2>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-mcp/src/config.rs
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// agent-mcp/src/config.rs
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = &quot;type&quot;, rename_all = &quot;snake_case&quot;)]
@@ -60,7 +60,7 @@ impl McpConfig {
     }
 }</code></pre></div>
 <h2 id="4-mcp-server-连接">4. MCP Server 连接</h2>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-mcp/src/server.rs
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// agent-mcp/src/server.rs
 
 pub struct McpServer {
     name: String,
@@ -122,7 +122,7 @@ impl McpServer {
     }
 }</code></pre></div>
 <h2 id="5-mcp-host-聚合层">5. MCP Host（聚合层）</h2>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// hermes-mcp/src/host.rs
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">// agent-mcp/src/host.rs
 
 pub struct McpToolHost {
     servers: Vec&lt;McpServer&gt;,
@@ -206,8 +206,8 @@ pub enum McpError {
     Config(#[from] toml::de::Error),
 }</code></pre></div>
 <h2 id="7-使用示例">7. 使用示例</h2>
-<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">use hermes_mcp::{McpConfig, McpToolHost};
-use hermes_core::ToolHost;
+<div class="code-block"><span class="code-block__lang">rust</span><button class="copy-code" type="button">复制</button><pre><code class="language-rust">use agent_mcp::{McpConfig, McpToolHost};
+use agent_contract::ToolHost;
 
 #[tokio::main]
 async fn main() -&gt; Result&lt;()&gt; {

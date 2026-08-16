@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/hermes-error",
-    "crates/hermes-core",
-    "crates/hermes-llm",
-    "crates/hermes-mcp",
-    "crates/hermes-store",
-    "crates/hermes-config",
-    "crates/hermes-compaction",
-    "crates/hermes-ipc",
-    "crates/hermes-tauri",
+    "crates/agent-error",
+    "crates/agent-contract",
+    "crates/agent-llm",
+    "crates/agent-mcp",
+    "crates/agent-store",
+    "crates/agent-config",
+    "crates/agent-compaction",
+    "crates/agent-ipc",
+    "crates/agent-tauri",
 ]
 
 [workspace.package]
@@ -49,14 +49,14 @@ dirs = "5"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # 内部 crate（workspace 别名）
-hermes-error = { path = "crates/hermes-error" }
-hermes-core = { path = "crates/hermes-core" }
-hermes-llm = { path = "crates/hermes-llm" }
-hermes-mcp = { path = "crates/hermes-mcp" }
-hermes-store = { path = "crates/hermes-store" }
-hermes-config = { path = "crates/hermes-config" }
-hermes-compaction = { path = "crates/hermes-compaction" }
-hermes-ipc = { path = "crates/hermes-ipc" }
+agent-error = { path = "crates/agent-error" }
+agent-contract = { path = "crates/agent-contract" }
+agent-llm = { path = "crates/agent-llm" }
+agent-mcp = { path = "crates/agent-mcp" }
+agent-store = { path = "crates/agent-store" }
+agent-config = { path = "crates/agent-config" }
+agent-compaction = { path = "crates/agent-compaction" }
+agent-ipc = { path = "crates/agent-ipc" }
 
 [profile.dev]
 opt-level = 0
