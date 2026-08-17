@@ -69,7 +69,7 @@ fn ark_vision(model: &str) -> bool {
 }
 
 fn kimi_context(model: &str) -> u32 {
-    if model.trim().to_ascii_lowercase() == "k3" {
+    if model.trim().eq_ignore_ascii_case("k3") {
         1_048_576
     } else {
         262_144
@@ -176,8 +176,12 @@ mod tests {
 
     #[test]
     fn ark_anthropic_passthrough_thinking_and_keeps_temperature() {
-        let d = dialect_for("ark_coding", "ark-code-latest", DialectPort::AnthropicMessages)
-            .unwrap();
+        let d = dialect_for(
+            "ark_coding",
+            "ark-code-latest",
+            DialectPort::AnthropicMessages,
+        )
+        .unwrap();
         assert!(d.thinking_vocab.contains(&"adaptive"));
         assert!(d.adaptive_maps_to.is_none());
         assert!(!d.omit_temperature && !d.omit_temperature_when_thinking);
@@ -188,16 +192,24 @@ mod tests {
 
     #[test]
     fn ark_agent_uses_one_million_context() {
-        let d = dialect_for("ark_agent", "deepseek-v4-flash", DialectPort::AnthropicMessages)
-            .unwrap();
+        let d = dialect_for(
+            "ark_agent",
+            "deepseek-v4-flash",
+            DialectPort::AnthropicMessages,
+        )
+        .unwrap();
         assert_eq!(d.max_context_tokens, 1_048_576);
         assert!(!d.supports_vision);
     }
 
     #[test]
     fn ark_chat_forces_stream_usage() {
-        let d = dialect_for("ark_coding_openai", "ark-code-latest", DialectPort::OpenAiChat)
-            .unwrap();
+        let d = dialect_for(
+            "ark_coding_openai",
+            "ark-code-latest",
+            DialectPort::OpenAiChat,
+        )
+        .unwrap();
         assert!(d.force_stream_usage);
         assert_eq!(d.effort_wire, EffortWire::TopLevel);
     }
@@ -225,8 +237,12 @@ mod tests {
 
     #[test]
     fn kimi_coding_models_without_effort_leave_vocab_empty() {
-        let d =
-            dialect_for("kimi_coding", "kimi-for-coding", DialectPort::AnthropicMessages).unwrap();
+        let d = dialect_for(
+            "kimi_coding",
+            "kimi-for-coding",
+            DialectPort::AnthropicMessages,
+        )
+        .unwrap();
         assert!(d.effort_vocab.is_empty());
     }
 

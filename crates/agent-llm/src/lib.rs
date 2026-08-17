@@ -91,6 +91,17 @@ pub enum ProviderConfig {
         model: String,
         base_url: Option<String>,
     },
+    /// Ark Coding Plan / Agent Plan 的 Responses 口。
+    ///
+    /// `kind` 为稳定的厂商身份（`ark_coding` / `ark_coding_openai` / `ark_agent`），
+    /// 决定上下文窗口（Coding 256K，Agent 1M）。reasoning 以 Ark 的明文
+    /// summary 形式保存并回传（`ReasoningMode::SummaryReplay`）。
+    ArkResponses {
+        api_key: String,
+        model: String,
+        base_url: String,
+        kind: String,
+    },
     DeepSeek {
         api_key: String,
         model: String,
@@ -114,8 +125,7 @@ pub fn create_provider(config: ProviderConfig) -> Result<Box<dyn LlmProvider>> {
             let dialect = dialect_for("kimi_coding", &model, DialectPort::AnthropicMessages)
                 .unwrap_or_else(|| unreachable!("kimi_coding dialect must resolve"));
             Ok(Box::new(
-                AnthropicProvider::new_kimi_coding(api_key, model, base_url)?
-                    .with_dialect(dialect),
+                AnthropicProvider::new_kimi_coding(api_key, model, base_url)?.with_dialect(dialect),
             ))
         }
         ProviderConfig::ArkAnthropic {
@@ -180,6 +190,14 @@ pub fn create_provider(config: ProviderConfig) -> Result<Box<dyn LlmProvider>> {
         } => Ok(Box::new(AnthropicProvider::new_deepseek(
             api_key, model, base_url,
         )?)),
+        ProviderConfig::ArkResponses {
+            api_key,
+            model,
+            base_url,
+            kind,
+        } => Ok(Box::new(ResponsesProvider::new_ark(
+            api_key, model, base_url, &kind,
+        ))),
         ProviderConfig::DeepSeek {
             api_key,
             model,
@@ -250,5 +268,32 @@ mod tests {
             deepseek_anthropic.capabilities().max_context_tokens,
             1_000_000
         );
+
+        let ark_agent_responses = create_provider(ProviderConfig::ArkResponses {
+            api_key: "k".into(),
+            model: "glm-5.3".into(),
+            base_url: "https://ark.cn-beijing.volces.com/api/plan/v3".into(),
+            kind: "ark_agent".into(),
+        })
+        .unwrap();
+        assert_eq!(ark_agent_responses.name(), "ark_responses");
+        assert_eq!(
+            ark_agent_responses.capabilities().max_context_tokens,
+            1_048_576
+        );
+        assert!(!ark_agent_responses.capabilities().supports_vision);
+
+        let ark_coding_responses = create_provider(ProviderConfig::ArkResponses {
+            api_key: "k".into(),
+            model: "doubao-seed-2.1-pro".into(),
+            base_url: "https://ark.cn-beijing.volces.com/api/coding/v3".into(),
+            kind: "ark_coding".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            ark_coding_responses.capabilities().max_context_tokens,
+            256_000
+        );
+        assert!(ark_coding_responses.capabilities().supports_vision);
     }
 }

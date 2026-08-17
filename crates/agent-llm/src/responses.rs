@@ -57,6 +57,12 @@ pub enum ReasoningMode {
     /// 与 OpenAI 的 `encrypted_content` 不同，这里没有加密块：明文链直接保存在
     /// [`ContentBlock::Thinking::thinking`]，`signature` 恒为 `None`。
     PlaintextReplay,
+    /// 火山方舟（Ark）Responses：reasoning 以 **`summary[].summary_text`** 返回，
+    /// 没有 `content` 也没有 `encrypted_content`。Ark 不强制回传 reasoning item，
+    /// 但回传会被接受；R-Code 仍把摘要保存在
+    /// [`ContentBlock::Thinking::thinking`] 并在下一轮原样回传，保持多轮工具调用
+    /// 之间的思维链不丢（对齐 Ark 的 `response.reasoning_summary_text.delta`）。
+    SummaryReplay,
 }
 
 pub struct ResponsesProvider {
@@ -70,6 +76,7 @@ pub struct ResponsesProvider {
     max_context_tokens: u32,
     max_output_tokens: u32,
     deepseek_automatic_cache: bool,
+    ark_effort: bool,
     supports_vision: bool,
     provider_name: &'static str,
 }
@@ -89,6 +96,7 @@ impl ResponsesProvider {
             max_context_tokens: 200_000,
             max_output_tokens: 0,
             deepseek_automatic_cache: false,
+            ark_effort: false,
             supports_vision: true,
             provider_name: "openai_responses",
         }
@@ -101,7 +109,7 @@ impl ResponsesProvider {
             .trim()
             .to_ascii_lowercase()
             .starts_with("deepseek-v4-")
-            || model.trim().to_ascii_lowercase() == "deepseek-chat";
+            || model.trim().eq_ignore_ascii_case("deepseek-chat");
         let mut provider = Self::new(api_key, model, base_url);
         provider.max_context_tokens = 1_000_000;
         // DeepSeek V4 的单次输出上限是 393_216（API 报错口径）；非 V4 未声明。
@@ -112,6 +120,28 @@ impl ResponsesProvider {
         // DeepSeek Responses 的 thinking 模式返回明文 reasoning_text，下一轮必须原样
         // 回传，否则 400（见 ReasoningMode::PlaintextReplay）。
         provider.reasoning = ReasoningMode::PlaintextReplay;
+        provider
+    }
+
+    /// Ark Coding Plan / Agent Plan 的 Responses 口。
+    ///
+    /// 与 DeepSeek 一样走 `store=false` 的无状态全历史重放。Ark 的 reasoning 是
+    /// 明文 summary（非加密、非必回传），用 [`ReasoningMode::SummaryReplay`] 保存
+    /// 并回传。Coding Plan 上下文 256K，Agent Plan 上下文 1M。
+    pub fn new_ark(api_key: String, model: String, base_url: String, kind: &str) -> Self {
+        let kind = kind.trim().to_ascii_lowercase();
+        let max_context_tokens = if kind == "ark_agent" {
+            1_048_576
+        } else {
+            256_000
+        };
+        let mut provider = Self::new(api_key, model.clone(), base_url);
+        provider.max_context_tokens = max_context_tokens;
+        provider.max_output_tokens = 0;
+        provider.reasoning = ReasoningMode::SummaryReplay;
+        provider.ark_effort = true;
+        provider.supports_vision = model.to_ascii_lowercase().contains("doubao-seed");
+        provider.provider_name = "ark_responses";
         provider
     }
 
@@ -132,26 +162,6 @@ impl ResponsesProvider {
     }
 
     fn build_body(&self, request: &CompletionRequest, stream: bool) -> Value {
-        let mut input: Vec<Value> = Vec::new();
-        for message in &request.messages {
-            input.extend(message_to_items(message, self.reasoning));
-        }
-        let input = sanitize_input_items(input);
-
-        let mut body = json!({
-            "model": request.model,
-            "input": input,
-            "max_output_tokens": request.max_tokens,
-            // 本地保存历史 + 每轮全量重放，不依赖服务端会话
-            "store": false,
-        });
-        if let Some(system) = &request.system {
-            // Responses 的 instructions 不会被上一轮继承，每次都要带
-            body["instructions"] = json!(system);
-        }
-        if let Some(temp) = request.temperature {
-            body["temperature"] = json!(temp);
-        }
         // Responses has no `thinking` field.  For DeepSeek only, translate R-Code's local
         // thinking selection into the vendor's native reasoning effort: disabled means no
         // reasoning, while enabled/adaptive starts at high unless the user/governor supplied an
@@ -169,9 +179,73 @@ impl ResponsesProvider {
                     .or(Some("high")),
                 _ => request.inference.reasoning_effort.as_deref(),
             }
+        } else if self.ark_effort {
+            // Ark 探针冻结事实（2026-08-16，glm-5.3 / /api/plan/v3/responses）：
+            // reasoning_effort 只接受 low/medium/high/xhigh/max；none 与 minimal 直接
+            // 400。Ark 没有关闭 reasoning 的 wire 值（不传参数时服务端仍会输出
+            // reasoning summary），因此 disabled 只能退化为「不发送 reasoning 参数」。
+            const ARK_EFFORT_VOCAB: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+            let explicit = request.inference.reasoning_effort.as_deref();
+            match explicit {
+                Some(value) if ARK_EFFORT_VOCAB.contains(&value) => Some(value),
+                Some("none" | "minimal") => None,
+                Some(_) => None,
+                None => match request.inference.thinking.as_deref() {
+                    Some("enabled") => Some("high"),
+                    Some("disabled" | "adaptive") | None => None,
+                    _ => None,
+                },
+            }
         } else {
             request.inference.reasoning_effort.as_deref()
         };
+
+        // DeepSeek Responses 的 thinking 模式要求工具调用轮把 reasoning item 回传
+        // （空 reasoning_text 可接受，缺 item 400 "must be passed back"）。历史
+        // 可能因旧版本落盘或压缩而丢块，发送前补一个空 reasoning item 兜底；
+        // 本轮 thinking 关闭（effort=none）时不注入，保持请求字节稳定。
+        let deepseek_thinking =
+            self.reasoning == ReasoningMode::PlaintextReplay && effort != Some("none");
+
+        let mut input: Vec<Value> = Vec::new();
+        for message in &request.messages {
+            let mut items = message_to_items(message, self.reasoning);
+            if deepseek_thinking
+                && message.role == Role::Assistant
+                && message.content.iter().any(ContentBlock::is_tool_use)
+                && !message
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::Thinking { .. }))
+            {
+                items.insert(
+                    0,
+                    json!({
+                        "type": "reasoning",
+                        "content": [
+                            { "type": "reasoning_text", "text": "" }
+                        ],
+                    }),
+                );
+            }
+            input.extend(items);
+        }
+        let input = sanitize_input_items(input);
+
+        let mut body = json!({
+            "model": request.model,
+            "input": input,
+            "max_output_tokens": request.max_tokens,
+            // 本地保存历史 + 每轮全量重放，不依赖服务端会话
+            "store": false,
+        });
+        if let Some(system) = &request.system {
+            // Responses 的 instructions 不会被上一轮继承，每次都要带
+            body["instructions"] = json!(system);
+        }
+        if let Some(temp) = request.temperature {
+            body["temperature"] = json!(temp);
+        }
         if let Some(effort) = effort {
             body["reasoning"] = json!({ "effort": effort });
         }
@@ -407,6 +481,19 @@ pub fn message_to_items(msg: &Message, reasoning: ReasoningMode) -> Vec<Value> {
                                         { "type": "reasoning_text", "text": thinking.as_str() }
                                     ],
                                 }));
+                            }
+                            ReasoningMode::SummaryReplay => {
+                                // Ark 接受最小 summary-only 的 reasoning item 回传
+                                // （2026-08-16 探针冻结：id / status 均可省略）。
+                                if !thinking.is_empty() {
+                                    flush_assistant_text(&mut text_buffer, &mut items);
+                                    items.push(json!({
+                                        "type": "reasoning",
+                                        "summary": [
+                                            { "type": "summary_text", "text": thinking.as_str() }
+                                        ],
+                                    }));
+                                }
                             }
                             ReasoningMode::Drop => {}
                         }
@@ -676,6 +763,17 @@ fn parse_responses_response_with_cache(
                             thinking: reasoning_text_of(item),
                             signature: None,
                         });
+                    }
+                    ReasoningMode::SummaryReplay => {
+                        // Ark 的 reasoning item 只有 summary[]，没有 content 或
+                        // encrypted_content。摘要落入 Thinking，下一轮按原样回传。
+                        let thinking = reasoning_summary_text(item);
+                        if !thinking.is_empty() {
+                            content.push(ContentBlock::Thinking {
+                                thinking,
+                                signature: None,
+                            });
+                        }
                     }
                     ReasoningMode::Drop => {}
                 }
@@ -1399,6 +1497,74 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_injects_empty_reasoning_for_legacy_tool_turns_missing_it() {
+        let provider = ResponsesProvider::new_deepseek(
+            "sk-test".into(),
+            "deepseek-v4-pro".into(),
+            "https://api.deepseek.com".into(),
+        );
+        let mut req = request(vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    input: json!({"path": "/a"}),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                }],
+            },
+        ]);
+        req.model = "deepseek-v4-pro".into();
+        req.inference = agent_contract::InferenceOptions {
+            thinking: Some("enabled".into()),
+            ..Default::default()
+        };
+
+        let body = provider.build_body(&req, false);
+        let input = body["input"].as_array().unwrap();
+        // 缺失 reasoning 的旧历史工具轮在发送前补一个空 reasoning item。
+        assert_eq!(input[0]["type"], "reasoning");
+        assert_eq!(input[0]["content"][0]["type"], "reasoning_text");
+        assert_eq!(input[0]["content"][0]["text"], "");
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn deepseek_does_not_inject_reasoning_when_thinking_is_disabled() {
+        let provider = ResponsesProvider::new_deepseek(
+            "sk-test".into(),
+            "deepseek-v4-pro".into(),
+            "https://api.deepseek.com".into(),
+        );
+        let mut req = request(vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "read_file".into(),
+                input: json!({"path": "/a"}),
+            }],
+        }]);
+        req.model = "deepseek-v4-pro".into();
+        req.inference = agent_contract::InferenceOptions {
+            thinking: Some("disabled".into()),
+            ..Default::default()
+        };
+
+        let body = provider.build_body(&req, false);
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call");
+    }
+
+    #[test]
     fn inference_options_use_responses_reasoning_and_text_objects() {
         let mut req = request(vec![]);
         req.inference = agent_contract::InferenceOptions {
@@ -1721,13 +1887,20 @@ mod tests {
         let body = provider.build_body(&completion, false);
         let input = body["input"].as_array().expect("responses input");
 
-        assert_eq!(input.len(), 2, "function call + its paired output");
-        assert_eq!(input[0]["type"], "function_call");
-        assert_eq!(input[0]["call_id"], "call_read");
-        assert_eq!(input[1]["type"], "function_call_output");
+        // thinking 模式下，缺 reasoning 的工具轮会在发送前补空 reasoning item。
+        assert_eq!(
+            input.len(),
+            3,
+            "empty reasoning + function call + its paired output"
+        );
+        assert_eq!(input[0]["type"], "reasoning");
+        assert_eq!(input[0]["content"][0]["text"], "");
+        assert_eq!(input[1]["type"], "function_call");
         assert_eq!(input[1]["call_id"], "call_read");
-        assert_eq!(input[1]["output"].as_str(), Some(evidence.as_str()));
-        assert!(input[1]["output"]
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[2]["call_id"], "call_read");
+        assert_eq!(input[2]["output"].as_str(), Some(evidence.as_str()));
+        assert!(input[2]["output"]
             .as_str()
             .is_some_and(|output| output.ends_with("__TOOL_EVIDENCE_TAIL_RESPONSES__")));
         assert!(!body.to_string().contains("call_orphan"));
@@ -1958,6 +2131,85 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn ark_summary_reasoning_roundtrips_without_dropping() {
+        let response = serde_json::json!({
+            "status": "completed",
+            "output": [
+                {"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"先检查再动手"}]},
+                {"type":"message","content":[{"type":"output_text","text":"done"}]}
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 2}
+        });
+        let parsed =
+            parse_responses_response_with_cache(&response, ReasoningMode::SummaryReplay, false)
+                .unwrap();
+        assert!(matches!(
+            parsed.content.as_slice(),
+            [ContentBlock::Thinking { thinking, signature: None }, ContentBlock::Text { .. }]
+                if thinking == "先检查再动手"
+        ));
+
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "先检查再动手".into(),
+                    signature: None,
+                },
+                ContentBlock::Text {
+                    text: "done".into(),
+                },
+            ],
+        };
+        let items = message_to_items(&msg, ReasoningMode::SummaryReplay);
+        assert_eq!(items[0]["type"], "reasoning");
+        assert_eq!(items[0]["summary"][0]["type"], "summary_text");
+        assert_eq!(items[0]["summary"][0]["text"], "先检查再动手");
+    }
+
+    #[test]
+    fn ark_effort_mapping_filters_rejected_vocab() {
+        let provider = ResponsesProvider::new_ark(
+            "k".into(),
+            "glm-5.3".into(),
+            "https://ark.cn-beijing.volces.com/api/plan/v3".into(),
+            "ark_agent",
+        );
+        let cases: Vec<(Option<&str>, Option<&str>, Option<&str>)> = vec![
+            (Some("enabled"), None, Some("high")),
+            (None, Some("low"), Some("low")),
+            (None, Some("max"), Some("max")),
+            (None, Some("none"), None),
+            (None, Some("minimal"), None),
+            (Some("disabled"), None, None),
+            (Some("adaptive"), None, None),
+        ];
+        for (thinking, effort, expected) in cases {
+            let request = CompletionRequest {
+                model: "glm-5.3".into(),
+                system: None,
+                messages: vec![Message::user_text("ping")],
+                tools: vec![],
+                hosted_tools: vec![],
+                max_tokens: 16,
+                temperature: None,
+                enable_caching: false,
+                inference: agent_contract::InferenceOptions {
+                    thinking: thinking.map(str::to_string),
+                    reasoning_effort: effort.map(str::to_string),
+                    verbosity: None,
+                },
+            };
+            let body = provider.build_body(&request, false);
+            let actual = body
+                .get("reasoning")
+                .and_then(|value| value.get("effort"))
+                .and_then(Value::as_str);
+            assert_eq!(actual, expected, "thinking={thinking:?} effort={effort:?}");
+        }
+    }
+
     fn run_stream_with_reasoning(reasoning: ReasoningMode, frames: &[&str]) -> Vec<StreamEvent> {
         let mut state = StreamState {
             reasoning,
@@ -1976,11 +2228,9 @@ mod tests {
         // 也必须把明文 reasoning 提出来，否则下一轮回传缺失会 400。
         let events = run_stream_with_reasoning(
             ReasoningMode::PlaintextReplay,
-            &[
-                r#"{"type":"response.output_item.done","sequence_number":1,
+            &[r#"{"type":"response.output_item.done","sequence_number":1,
                     "item":{"type":"reasoning","id":"rs_1",
-                            "content":[{"type":"reasoning_text","text":"先想一下再回答"}]}}"#,
-            ],
+                            "content":[{"type":"reasoning_text","text":"先想一下再回答"}]}}"#],
         );
         assert!(events.iter().any(
             |event| matches!(event, StreamEvent::ReasoningDelta { text } if text == "先想一下再回答")
@@ -1993,11 +2243,9 @@ mod tests {
         // “没有 reasoning”，否则下一轮缺少空 reasoning_text 会 400。
         let events = run_stream_with_reasoning(
             ReasoningMode::PlaintextReplay,
-            &[
-                r#"{"type":"response.output_item.done","sequence_number":1,
+            &[r#"{"type":"response.output_item.done","sequence_number":1,
                     "item":{"type":"reasoning","id":"rs_1",
-                            "content":[{"type":"reasoning_text","text":""}]}}"#,
-            ],
+                            "content":[{"type":"reasoning_text","text":""}]}}"#],
         );
         assert!(matches!(
             &events[..],

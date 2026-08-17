@@ -14,12 +14,12 @@
 
 use std::time::Duration;
 
-use futures::StreamExt;
 use agent_contract::{
     CompletionRequest, ContentBlock, LlmProvider, Message, Role, StopReason, StreamEvent, Usage,
 };
 use agent_llm::deepseek::DeepSeekProvider;
 use agent_llm::{create_provider, ProviderConfig};
+use futures::StreamExt;
 
 /// 模拟 P0-A 落地后的稳定 system（不含时间戳等动态内容，字节跨轮不变）。
 /// 长度约 250 tokens，明显超过 DeepSeek 缓存块粒度（~64 tokens）。

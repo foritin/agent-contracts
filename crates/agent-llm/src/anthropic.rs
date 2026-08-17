@@ -141,8 +141,7 @@ impl AnthropicProvider {
             // 省略，effort 只按 EffortWire::Nested 嵌进 thinking 对象。
             let thinking = dialect_thinking_value(dialect, request.inference.thinking.as_deref());
             let omit_temperature = dialect.omit_temperature
-                || (dialect.omit_temperature_when_thinking
-                    && matches!(thinking, Some("enabled")));
+                || (dialect.omit_temperature_when_thinking && matches!(thinking, Some("enabled")));
             if !omit_temperature {
                 if let Some(temp) = request.temperature {
                     body["temperature"] = json!(temp);
@@ -170,8 +169,8 @@ impl AnthropicProvider {
             if let Some(temp) = request.temperature {
                 body["temperature"] = json!(temp);
             }
-            let is_deepseek_v4 = self.deepseek_automatic_cache
-                && is_deepseek_v4_alias(&request.model);
+            let is_deepseek_v4 =
+                self.deepseek_automatic_cache && is_deepseek_v4_alias(&request.model);
             if let Some(thinking) = request.inference.thinking.as_deref() {
                 // `adaptive` is an R-Code-side governor marker for DeepSeek.  DeepSeek's
                 // Anthropic compatibility endpoint accepts enabled/disabled, whereas Anthropic
@@ -2159,8 +2158,12 @@ mod tests {
         )
         .unwrap()
         .with_dialect(
-            dialect_for("ark_coding", "ark-code-latest", DialectPort::AnthropicMessages)
-                .expect("ark anthropic dialect"),
+            dialect_for(
+                "ark_coding",
+                "ark-code-latest",
+                DialectPort::AnthropicMessages,
+            )
+            .expect("ark anthropic dialect"),
         );
         let mut request = test_completion_request();
         request.model = "ark-code-latest".into();

@@ -3,7 +3,9 @@
 //! 参见 `01-llm-provider.html §4.3`。
 
 use crate::openai::OpenAiProvider;
-use agent_contract::{Capabilities, CompletionRequest, CompletionResponse, LlmProvider, StreamEvent};
+use agent_contract::{
+    Capabilities, CompletionRequest, CompletionResponse, LlmProvider, StreamEvent,
+};
 use agent_error::Result;
 
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";

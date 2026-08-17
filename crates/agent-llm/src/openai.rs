@@ -93,10 +93,10 @@ impl OpenAiProvider {
 
     /// 应用实测冻结的厂商方言；UA 覆盖会重建 client。
     pub(crate) fn with_dialect(mut self, dialect: WireDialect) -> Self {
-        if dialect.user_agent.is_some() {
+        if let Some(user_agent) = dialect.user_agent {
             self.client = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(15))
-                .user_agent(dialect.user_agent.expect("checked above"))
+                .user_agent(user_agent)
                 .build()
                 .expect("openai provider client with dialect ua");
         }
@@ -149,58 +149,59 @@ impl OpenAiProvider {
             .dialect
             .as_ref()
             .is_some_and(|dialect| dialect.echo_reasoning);
-        let (thinking, reasoning_effort, dialect_omit_temp_for_thinking) =
-            if let Some(dialect) = &self.dialect {
-                let thinking =
-                    dialect_thinking_value(dialect, request.inference.thinking.as_deref());
-                let reasoning_effort = match dialect.effort_wire {
-                    EffortWire::TopLevel => request
+        let (thinking, reasoning_effort, dialect_omit_temp_for_thinking) = if let Some(dialect) =
+            &self.dialect
+        {
+            let thinking = dialect_thinking_value(dialect, request.inference.thinking.as_deref());
+            let reasoning_effort = match dialect.effort_wire {
+                EffortWire::TopLevel => {
+                    request
                         .inference
                         .reasoning_effort
                         .as_deref()
                         .filter(|value| {
                             dialect.effort_vocab.is_empty() || dialect.effort_vocab.contains(value)
-                        }),
-                    _ => None,
-                };
-                (
-                    thinking,
-                    reasoning_effort,
-                    dialect.omit_temperature_when_thinking
-                        && matches!(thinking, Some("enabled")),
-                )
-            } else {
-                let is_deepseek = self.force_stream_usage || model_lower.contains("deepseek");
-                // 实测：deepseek-chat 已被服务端别名到 deepseek-v4-flash。
-                let is_deepseek_v4 = is_deepseek
-                    && (model_lower.contains("deepseek-v4") || model_lower == "deepseek-chat");
-                let thinking = request.inference.thinking.as_deref().map(|thinking| {
-                    if is_deepseek_v4 && thinking == "adaptive" {
-                        "enabled"
-                    } else {
-                        thinking
-                    }
-                });
-                let reasoning_effort = if is_deepseek_v4 {
-                    match request.inference.thinking.as_deref() {
-                        // The off switch wins over a stale effort saved by an earlier UI selection.
-                        Some("disabled") => None,
-                        Some("enabled" | "adaptive") => request
-                            .inference
-                            .reasoning_effort
-                            .as_deref()
-                            .or(Some("high")),
-                        _ => request.inference.reasoning_effort.as_deref(),
-                    }
-                } else {
-                    request.inference.reasoning_effort.as_deref()
-                };
-                (
-                    thinking,
-                    reasoning_effort,
-                    is_deepseek && matches!(thinking, Some("enabled")),
-                )
+                        })
+                }
+                _ => None,
             };
+            (
+                thinking,
+                reasoning_effort,
+                dialect.omit_temperature_when_thinking && matches!(thinking, Some("enabled")),
+            )
+        } else {
+            let is_deepseek = self.force_stream_usage || model_lower.contains("deepseek");
+            // 实测：deepseek-chat 已被服务端别名到 deepseek-v4-flash。
+            let is_deepseek_v4 = is_deepseek
+                && (model_lower.contains("deepseek-v4") || model_lower == "deepseek-chat");
+            let thinking = request.inference.thinking.as_deref().map(|thinking| {
+                if is_deepseek_v4 && thinking == "adaptive" {
+                    "enabled"
+                } else {
+                    thinking
+                }
+            });
+            let reasoning_effort = if is_deepseek_v4 {
+                match request.inference.thinking.as_deref() {
+                    // The off switch wins over a stale effort saved by an earlier UI selection.
+                    Some("disabled") => None,
+                    Some("enabled" | "adaptive") => request
+                        .inference
+                        .reasoning_effort
+                        .as_deref()
+                        .or(Some("high")),
+                    _ => request.inference.reasoning_effort.as_deref(),
+                }
+            } else {
+                request.inference.reasoning_effort.as_deref()
+            };
+            (
+                thinking,
+                reasoning_effort,
+                is_deepseek && matches!(thinking, Some("enabled")),
+            )
+        };
 
         let deepseek_thinking = self.dialect.is_none()
             && (self.force_stream_usage || model_lower.contains("deepseek"))
@@ -2572,7 +2573,10 @@ mod tests {
         request.inference.thinking = Some("enabled".into());
         request.inference.reasoning_effort = Some("high".into());
         let body = provider.build_body(&request, false);
-        assert!(body.get("temperature").is_none(), "kimi must never send temperature");
+        assert!(
+            body.get("temperature").is_none(),
+            "kimi must never send temperature"
+        );
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["reasoning_effort"], "high");
 
@@ -2583,7 +2587,9 @@ mod tests {
                     thinking: "reasoning".into(),
                     signature: None,
                 },
-                ContentBlock::Text { text: "answer".into() },
+                ContentBlock::Text {
+                    text: "answer".into(),
+                },
             ],
         };
         let messages = messages_to_openai(&assistant, true);
@@ -2599,8 +2605,12 @@ mod tests {
             "https://ark.cn-beijing.volces.com/api/coding/v3".into(),
         )
         .with_dialect(
-            dialect_for("ark_coding_openai", "ark-code-latest", DialectPort::OpenAiChat)
-                .expect("ark chat dialect"),
+            dialect_for(
+                "ark_coding_openai",
+                "ark-code-latest",
+                DialectPort::OpenAiChat,
+            )
+            .expect("ark chat dialect"),
         );
         let mut request = tool_round_request("ark-code-latest", vec![Message::user_text("hi")]);
         request.temperature = Some(0.3);

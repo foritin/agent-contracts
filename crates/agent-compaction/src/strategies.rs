@@ -259,10 +259,10 @@ impl CompactionStrategy for SmartCompaction {
 mod tests {
     use super::*;
     use crate::manager::CompactionManager;
-    use async_trait::async_trait;
     use agent_contract::{
         Capabilities, CompletionResponse, ContentBlock, StopReason, StreamEvent, Usage,
     };
+    use async_trait::async_trait;
 
     /// 测试用 DummyProvider，返回固定摘要文本。
     struct DummyProvider {

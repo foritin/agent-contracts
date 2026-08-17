@@ -1,9 +1,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures::StreamExt;
 use agent_contract::{CompletionRequest, LlmProvider, Message, StreamEvent, Usage};
 use agent_llm::{create_provider, ProviderConfig};
+use futures::StreamExt;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
