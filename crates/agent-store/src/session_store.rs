@@ -31,8 +31,7 @@ fn is_durable_user_message_event(event: &str) -> bool {
 }
 
 fn is_durable_user_message_cancel_event(event: &str) -> bool {
-    event == DURABLE_USER_MESSAGE_CANCEL_EVENT
-        || event == LEGACY_DURABLE_USER_MESSAGE_CANCEL_EVENT
+    event == DURABLE_USER_MESSAGE_CANCEL_EVENT || event == LEGACY_DURABLE_USER_MESSAGE_CANCEL_EVENT
 }
 
 fn append_lock_for(path: &Path) -> Arc<SessionAppendLock> {
@@ -243,6 +242,11 @@ impl SessionStore {
                 SessionEvent::ModelProjection {
                     messages: projection,
                 } => model_projection = projection,
+                // 1.3（docs/harness-migration.md §1.3）：请求信封快照只用于审计与
+                // 派发前重建自检，不参与 messages / usage / tool_calls 投影
+                // （no-op）。若不显式列出，编译器会因新增变体而拒绝穷举 match，
+                // 这正是把「不得进入投影」固化为类型义务的方式。
+                SessionEvent::RequestHeader { .. } => {}
                 SessionEvent::Usage(u) => usage += u,
                 SessionEvent::ToolCall { .. } | SessionEvent::ToolResult { .. } => tool_calls += 1,
                 SessionEvent::System { event, data } => {
@@ -903,6 +907,63 @@ mod tests {
             .lines()
             .all(|line| serde_json::from_str::<SessionEvent>(line).is_ok()));
         assert_eq!(store.load(id).await.unwrap().messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn request_header_events_are_no_op_in_load_projection() {
+        // 1.3：RequestHeader 行夹在正常事件之间时，load 投影必须与没有它时完全
+        // 一致（不进 messages / usage / tool_calls），且原始行使用 snake_case tag。
+        let (_d, store) = setup().await;
+        let session = store.create("m", "p").await.unwrap();
+        let id = &session.meta.id;
+        store
+            .append(id, SessionEvent::Message(Message::user_text("question")))
+            .await
+            .unwrap();
+        for reason in ["initial", "change"] {
+            store
+                .append(
+                    id,
+                    SessionEvent::RequestHeader {
+                        system_sha256: format!("sys-{reason}"),
+                        tools_sha256: "tools".into(),
+                        messages_sha256: "messages".into(),
+                        reason: reason.into(),
+                        excluded_tails: vec!["local_clock".into()],
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .append(id, SessionEvent::Message(Message::assistant_text("answer")))
+            .await
+            .unwrap();
+        store
+            .append(id, SessionEvent::Usage(Usage::new(11, 7)))
+            .await
+            .unwrap();
+
+        let loaded = store.load(id).await.unwrap();
+        assert_eq!(loaded.messages.len(), 2, "RequestHeader 不得物化为消息");
+        assert_eq!(loaded.messages[0].text_content(), "question");
+        assert_eq!(loaded.messages[1].text_content(), "answer");
+        assert_eq!(loaded.total_input_tokens, 11);
+        assert_eq!(loaded.total_output_tokens, 7);
+        assert_eq!(loaded.total_tool_calls, 0);
+
+        // 原始 JSONL 使用与其他变体一致的外部 tagged + snake_case 表示，
+        // 供 jq 抽取（验收：手工跑长会话后 jq '.request_header.reason'）。
+        let content = tokio::fs::read_to_string(store.session_path(id))
+            .await
+            .unwrap();
+        let header_lines: Vec<&str> = content
+            .lines()
+            .filter(|line| line.contains(r#""request_header""#))
+            .collect();
+        assert_eq!(header_lines.len(), 2);
+        assert!(header_lines[0].contains(r#""reason":"initial""#));
+        assert!(header_lines[1].contains(r#""reason":"change""#));
     }
 
     #[tokio::test]

@@ -69,6 +69,28 @@ pub enum SessionEvent {
     ModelProjection {
         messages: Option<Vec<Message>>,
     },
+    /// 模型请求信封快照（docs/harness-migration.md §1.3）。每次派发前追加；
+    /// `reason` 区分 initial / resume / change。只存哈希不存全文（体积考虑：
+    /// 全文每轮落盘会让 JSONL 随轮数平方膨胀）。
+    ///
+    /// 审计 / 重建自检专用：`agent-store` 加载时对它做 no-op，不进入
+    /// messages / usage 投影。
+    RequestHeader {
+        /// system 文本指纹（serde_json 规范化字节流的 SHA-256 十六进制）。
+        system_sha256: String,
+        /// tools 列表指纹（同上；哈希覆盖完整 ToolSpec）。
+        tools_sha256: String,
+        /// 派发消息列表（已排除头部 memory 注入与 `excluded_tails` 登记 的
+        /// 尾部注入）的指纹。
+        messages_sha256: String,
+        /// 派发原因："initial"（会话/运行首轮）| "resume"（恢复类重放）|
+        /// "change"（其余常规轮）。
+        reason: String,
+        /// 尾部注入清单标签（本地时钟 / task_context / plan mode 等按轮注入、
+        /// 不落盘的尾部 user 消息），重建自检时按登记排除，不算不一致。
+        #[serde(default)]
+        excluded_tails: Vec<String>,
+    },
     System {
         event: String,
         data: Value,
@@ -215,6 +237,52 @@ mod tests {
             panic!("wrong event variant");
         };
         assert_eq!(messages.unwrap()[0].text_content(), "summary");
+    }
+
+    #[test]
+    fn request_header_roundtrips_with_snake_case_tag() {
+        // 1.3：RequestHeader 必须与其他变体保持一致的外部 tagged + snake_case
+        // 表示（`{"request_header":{...}}`），否则旧 jq 抽取脚本与新写入互不认识。
+        let ev = SessionEvent::RequestHeader {
+            system_sha256: "aa".into(),
+            tools_sha256: "bb".into(),
+            messages_sha256: "cc".into(),
+            reason: "initial".into(),
+            excluded_tails: vec!["local_clock".into(), "plan_mode".into()],
+        };
+        let encoded = serde_json::to_string(&ev).unwrap();
+        assert!(
+            encoded.contains(r#""request_header""#),
+            "encoded: {encoded}"
+        );
+        assert!(encoded.contains(r#""system_sha256":"aa""#));
+        assert!(encoded.contains(r#""excluded_tails":["local_clock","plan_mode"]"#));
+        let decoded: SessionEvent = serde_json::from_str(&encoded).unwrap();
+        let SessionEvent::RequestHeader {
+            system_sha256,
+            tools_sha256,
+            messages_sha256,
+            reason,
+            excluded_tails,
+        } = decoded
+        else {
+            panic!("wrong event variant");
+        };
+        assert_eq!(system_sha256, "aa");
+        assert_eq!(tools_sha256, "bb");
+        assert_eq!(messages_sha256, "cc");
+        assert_eq!(reason, "initial");
+        assert_eq!(
+            excluded_tails,
+            vec!["local_clock".to_string(), "plan_mode".to_string()]
+        );
+        // excluded_tails 缺省（旧读取器 / 手写行）时反序列化为空清单而非报错。
+        let without_tails = r#"{"request_header":{"system_sha256":"a","tools_sha256":"b","messages_sha256":"c","reason":"change"}}"#;
+        let decoded: SessionEvent = serde_json::from_str(without_tails).unwrap();
+        let SessionEvent::RequestHeader { excluded_tails, .. } = decoded else {
+            panic!("wrong event variant");
+        };
+        assert!(excluded_tails.is_empty());
     }
 
     #[test]
