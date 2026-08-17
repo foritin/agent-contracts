@@ -18,8 +18,22 @@ type SessionAppendLock = tokio::sync::Mutex<()>;
 /// A user message durably staged before an active runtime is asked to accept a steer.
 /// The record itself is the outbox: loaders materialize it as a normal message unless a matching
 /// cancellation record was appended after the runtime explicitly rejected the steer.
-pub const DURABLE_USER_MESSAGE_EVENT: &str = "r_code_durable_user_message";
-pub const DURABLE_USER_MESSAGE_CANCEL_EVENT: &str = "r_code_durable_user_message_cancelled";
+pub const DURABLE_USER_MESSAGE_EVENT: &str = "durable_user_message";
+pub const DURABLE_USER_MESSAGE_CANCEL_EVENT: &str = "durable_user_message_cancelled";
+
+/// legacy name, read-only：旧 JSONL 里的事件名带 `r_code_` 前缀，加载侧继续识别，
+/// 写入侧只用上面的新名。
+const LEGACY_DURABLE_USER_MESSAGE_EVENT: &str = "r_code_durable_user_message";
+const LEGACY_DURABLE_USER_MESSAGE_CANCEL_EVENT: &str = "r_code_durable_user_message_cancelled";
+
+fn is_durable_user_message_event(event: &str) -> bool {
+    event == DURABLE_USER_MESSAGE_EVENT || event == LEGACY_DURABLE_USER_MESSAGE_EVENT
+}
+
+fn is_durable_user_message_cancel_event(event: &str) -> bool {
+    event == DURABLE_USER_MESSAGE_CANCEL_EVENT
+        || event == LEGACY_DURABLE_USER_MESSAGE_CANCEL_EVENT
+}
 
 fn append_lock_for(path: &Path) -> Arc<SessionAppendLock> {
     static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<SessionAppendLock>>>> = OnceLock::new();
@@ -232,7 +246,7 @@ impl SessionStore {
                 SessionEvent::Usage(u) => usage += u,
                 SessionEvent::ToolCall { .. } | SessionEvent::ToolResult { .. } => tool_calls += 1,
                 SessionEvent::System { event, data } => {
-                    if event == DURABLE_USER_MESSAGE_EVENT {
+                    if is_durable_user_message_event(&event) {
                         let operation_id =
                             data.get("operation_id").and_then(serde_json::Value::as_str);
                         if operation_id.is_some_and(|operation_id| {
@@ -386,7 +400,7 @@ fn durable_operation_id(event: &SessionEvent) -> Option<&str> {
     let SessionEvent::System { event, data } = event else {
         return None;
     };
-    if event != DURABLE_USER_MESSAGE_EVENT && event != DURABLE_USER_MESSAGE_CANCEL_EVENT {
+    if !is_durable_user_message_event(event) && !is_durable_user_message_cancel_event(event) {
         return None;
     }
     data.get("operation_id")?.as_str()
@@ -396,7 +410,7 @@ fn cancelled_durable_operation_id(event: &SessionEvent) -> Option<String> {
     let SessionEvent::System { event, data } = event else {
         return None;
     };
-    (event == DURABLE_USER_MESSAGE_CANCEL_EVENT)
+    is_durable_user_message_cancel_event(event)
         .then(|| data.get("operation_id")?.as_str().map(str::to_owned))?
 }
 
@@ -806,6 +820,56 @@ mod tests {
             .await
             .unwrap();
         assert!(store.load(id).await.unwrap().messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_prefixed_durable_events_are_read_but_never_written() {
+        // legacy name, read-only：旧 JSONL 的 r_code_ 前缀事件必须继续被物化/取消，
+        // 新写入只用无前缀事件名。
+        let (_dir, store) = setup().await;
+        let session = store.create("m", "p").await.unwrap();
+        let id = &session.meta.id;
+        let legacy_staged = r#"{"system":{"event":"r_code_durable_user_message","data":{"operation_id":"legacy-1","message":{"role":"user","content":[{"type":"text","text":"legacy staged"}]},"mode":"steer"}}}"#;
+        let legacy_cancelled = r#"{"system":{"event":"r_code_durable_user_message","data":{"operation_id":"legacy-2","message":{"role":"user","content":[{"type":"text","text":"legacy cancelled"}]},"mode":"steer"}}}
+{"system":{"event":"r_code_durable_user_message_cancelled","data":{"operation_id":"legacy-2"}}}"#;
+        let path = store.session_path(id);
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        use tokio::io::AsyncWriteExt;
+        file.write_all(format!("{legacy_staged}\n{legacy_cancelled}\n").as_bytes())
+            .await
+            .unwrap();
+        file.flush().await.unwrap();
+        drop(file);
+
+        let loaded = store.load(id).await.unwrap();
+        assert_eq!(loaded.messages.len(), 1, "旧 staged 物化、被取消的不物化");
+        assert_eq!(loaded.messages[0].text_content(), "legacy staged");
+
+        store
+            .append_durable_user_message(
+                id,
+                "fresh-operation",
+                &Message::user_text("fresh write"),
+                "steer",
+                None,
+            )
+            .await
+            .unwrap();
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        let last_line = content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .next_back()
+            .unwrap();
+        assert!(
+            last_line.contains(r#""event":"durable_user_message""#),
+            "新写入必须使用无前缀事件名：{last_line}"
+        );
+        assert!(!last_line.contains("r_code_"));
     }
 
     #[tokio::test]

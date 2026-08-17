@@ -293,11 +293,11 @@ pub struct OrchestrationConfig {
 impl Default for OrchestrationConfig {
     fn default() -> Self {
         Self {
-            default_agent_engine: MainAgentEngine::RCode,
+            default_agent_engine: MainAgentEngine::Native,
             delegation_router: DelegationRouterMode::Balanced,
             allow_cross_engine_delegation: true,
             quality_loop: QualityLoopMode::Off,
-            quality_reviewer: QualityReviewer::RCode,
+            quality_reviewer: QualityReviewer::Native,
             max_review_rounds: default_review_rounds(),
             subagent_pool: SubagentPoolConfig::default(),
             run_budget: RunBudgetConfig::default(),
@@ -433,7 +433,8 @@ impl SubagentPoolConfig {
 #[serde(rename_all = "snake_case")]
 pub enum MainAgentEngine {
     #[default]
-    RCode,
+    #[serde(alias = "r_code")] // legacy name, read-only
+    Native,
     Codex,
 }
 
@@ -465,10 +466,11 @@ pub enum QualityLoopMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum QualityReviewer {
-    /// 与主执行器交叉复核；不可用时回退 R-Code。
+    /// 与主执行器交叉复核；不可用时回退内置引擎。
     Auto,
     #[default]
-    RCode,
+    #[serde(alias = "r_code")] // legacy name, read-only
+    Native,
     Codex,
 }
 
@@ -676,6 +678,8 @@ mod tests {
 
     #[test]
     fn legacy_orchestration_defaults_to_an_empty_subagent_pool() {
+        // legacy name, read-only：default_agent_engine = "r_code" 是旧配置键值，
+        // 读取别名必须继续映射到 Native。
         let orchestration: OrchestrationConfig = toml::from_str(
             r#"
 default_agent_engine = "r_code"
@@ -692,6 +696,8 @@ max_review_rounds = 1
             orchestration.delegation_router,
             DelegationRouterMode::Balanced
         );
+        assert_eq!(orchestration.default_agent_engine, MainAgentEngine::Native);
+        assert_eq!(orchestration.quality_reviewer, QualityReviewer::Native);
     }
 
     #[test]
@@ -923,14 +929,14 @@ memories_dir = "/tmp/h/m"
     }
 
     #[test]
-    fn quality_reviewer_defaults_to_r_code_without_overwriting_an_explicit_choice() {
+    fn quality_reviewer_defaults_to_native_without_overwriting_an_explicit_choice() {
         assert_eq!(
             OrchestrationConfig::default().quality_reviewer,
-            QualityReviewer::RCode
+            QualityReviewer::Native
         );
 
         let legacy: OrchestrationConfig = toml::from_str(r#"quality_loop = "auto""#).unwrap();
-        assert_eq!(legacy.quality_reviewer, QualityReviewer::RCode);
+        assert_eq!(legacy.quality_reviewer, QualityReviewer::Native);
 
         let explicit: OrchestrationConfig = toml::from_str(r#"quality_reviewer = "auto""#).unwrap();
         assert_eq!(explicit.quality_reviewer, QualityReviewer::Auto);
