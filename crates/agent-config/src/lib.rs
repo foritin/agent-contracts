@@ -34,8 +34,23 @@ pub struct Config {
     #[serde(default)]
     pub orchestration: OrchestrationConfig,
 
+    /// 诊断开关（默认全关，不改变任何产品行为）。
+    #[serde(default)]
+    pub diagnostics: DiagnosticsConfig,
+
     #[serde(default)]
     pub tauri: Option<TauriConfig>,
+}
+
+/// 诊断开关段。开启的项只增加观测输出（旁路文件 / 计数），不影响请求形状、
+/// 执行判定与 canonical 会话数据。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiagnosticsConfig {
+    /// 会话请求信封审计（docs/request-audit-and-anchoring.md 阶段 A）。默认关闭。
+    /// 开启后每轮派发前向 sessions/request-audit/{storage_id}.jsonl 追加
+    /// RequestHeader（含目录清单与输出预算）并做重建自检（log-only）。
+    #[serde(default)]
+    pub request_audit: bool,
 }
 
 /// 单个 LLM Provider 配置。api_key 在 Debug 中脱敏。
@@ -562,6 +577,7 @@ impl Default for Config {
                 trigger_threshold: default_trigger(),
             },
             orchestration: OrchestrationConfig::default(),
+            diagnostics: DiagnosticsConfig::default(),
             tauri: None,
         }
     }
@@ -674,6 +690,24 @@ mod tests {
             prompt_template_id: Some("implementation".to_string()),
             prompt: "Implement the delegated feature and report verification evidence.".to_string(),
         }
+    }
+
+    #[test]
+    fn diagnostics_defaults_to_disabled_and_parses_opt_in() {
+        // A3.2：旧配置（无 [diagnostics] 段）读回全默认；显式开启可 Round-trip。
+        let legacy: Config = toml::from_str("default_provider = \"x\"").unwrap();
+        assert!(!legacy.diagnostics.request_audit);
+        let enabled: Config = toml::from_str(
+            r#"
+default_provider = "x"
+[diagnostics]
+request_audit = true
+"#,
+        )
+        .unwrap();
+        assert!(enabled.diagnostics.request_audit);
+        let roundtrip = toml::to_string(&enabled).unwrap();
+        assert!(roundtrip.contains("request_audit = true"));
     }
 
     #[test]
