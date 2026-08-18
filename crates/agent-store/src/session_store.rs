@@ -930,6 +930,9 @@ mod tests {
                         messages_sha256: "messages".into(),
                         reason: reason.into(),
                         excluded_tails: vec!["local_clock".into()],
+                        tool_names: vec!["read_file".into()],
+                        hosted_tool_names: Vec::new(),
+                        max_tokens: 4_096,
                     },
                 )
                 .await

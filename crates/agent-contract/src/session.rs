@@ -90,6 +90,19 @@ pub enum SessionEvent {
         /// 不落盘的尾部 user 消息），重建自检时按登记排除，不算不一致。
         #[serde(default)]
         excluded_tails: Vec<String>,
+        /// 本轮 tools 数组的名字清单（按派发顺序，含 hosted 工具别名后的名字）。
+        /// 与 tools_sha256 互补：哈希负责字节级身份判等，名字清单负责 jq 级
+        /// 人可读审计（docs/request-audit-and-anchoring.md A1）。
+        #[serde(default)]
+        tool_names: Vec<String>,
+        /// 本轮 hosted 工具名（summary_only 轮为空）。
+        #[serde(default)]
+        hosted_tool_names: Vec<String>,
+        /// 本轮实际派发的 max_tokens（钳制后）。0 表示旧版本写入的行。
+        /// dsh issue #11 的教训：adapterDefaults 可能静默覆盖配置封顶，
+        /// 该字段让「模型看到的输出预算」直接可审计。
+        #[serde(default)]
+        max_tokens: u32,
     },
     System {
         event: String,
@@ -249,6 +262,9 @@ mod tests {
             messages_sha256: "cc".into(),
             reason: "initial".into(),
             excluded_tails: vec!["local_clock".into(), "plan_mode".into()],
+            tool_names: vec!["read_file".into(), "edit".into()],
+            hosted_tool_names: vec!["web_search".into()],
+            max_tokens: 8_192,
         };
         let encoded = serde_json::to_string(&ev).unwrap();
         assert!(
@@ -257,6 +273,9 @@ mod tests {
         );
         assert!(encoded.contains(r#""system_sha256":"aa""#));
         assert!(encoded.contains(r#""excluded_tails":["local_clock","plan_mode"]"#));
+        assert!(encoded.contains(r#""tool_names":["read_file","edit"]"#));
+        assert!(encoded.contains(r#""hosted_tool_names":["web_search"]"#));
+        assert!(encoded.contains(r#""max_tokens":8192"#));
         let decoded: SessionEvent = serde_json::from_str(&encoded).unwrap();
         let SessionEvent::RequestHeader {
             system_sha256,
@@ -264,6 +283,9 @@ mod tests {
             messages_sha256,
             reason,
             excluded_tails,
+            tool_names,
+            hosted_tool_names,
+            max_tokens,
         } = decoded
         else {
             panic!("wrong event variant");
@@ -276,13 +298,30 @@ mod tests {
             excluded_tails,
             vec!["local_clock".to_string(), "plan_mode".to_string()]
         );
-        // excluded_tails 缺省（旧读取器 / 手写行）时反序列化为空清单而非报错。
+        assert_eq!(
+            tool_names,
+            vec!["read_file".to_string(), "edit".to_string()]
+        );
+        assert_eq!(hosted_tool_names, vec!["web_search".to_string()]);
+        assert_eq!(max_tokens, 8_192);
+        // excluded_tails 及 A1 新字段缺省（旧读取器 / 手写行）时反序列化为
+        // 默认值而非报错：tool_names/hosted_tool_names 为空清单，max_tokens 为 0。
         let without_tails = r#"{"request_header":{"system_sha256":"a","tools_sha256":"b","messages_sha256":"c","reason":"change"}}"#;
         let decoded: SessionEvent = serde_json::from_str(without_tails).unwrap();
-        let SessionEvent::RequestHeader { excluded_tails, .. } = decoded else {
+        let SessionEvent::RequestHeader {
+            excluded_tails,
+            tool_names,
+            hosted_tool_names,
+            max_tokens,
+            ..
+        } = decoded
+        else {
             panic!("wrong event variant");
         };
         assert!(excluded_tails.is_empty());
+        assert!(tool_names.is_empty());
+        assert!(hosted_tool_names.is_empty());
+        assert_eq!(max_tokens, 0);
     }
 
     #[test]
