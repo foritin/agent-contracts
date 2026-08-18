@@ -303,6 +303,43 @@ pub struct OrchestrationConfig {
     /// 长任务循环护栏预算与停止信号阈值。
     #[serde(default)]
     pub run_budget: RunBudgetConfig,
+    /// 首轮派发的工具目录策略（锚定实验，docs/request-audit-and-anchoring.md C1）。
+    /// 默认 Full 即现状（不过滤）；非默认值仅裁剪模型可见目录（呈现层），
+    /// 不改变任何执行判定。
+    #[serde(default)]
+    pub first_round_catalog: FirstRoundCatalog,
+    /// 受限目录的晋升信号。默认 Either：首轮 outcome 含任意 assistant 内容
+    /// 即恢复完整目录（纯文字首答不会困死在受限目录）。
+    #[serde(default)]
+    pub first_round_promote_on: FirstRoundPromoteOn,
+}
+
+/// 首轮派发的工具目录策略（锚定实验）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FirstRoundCatalog {
+    /// 默认：不过滤，首轮即完整目录（现状）。
+    #[default]
+    Full,
+    /// 首轮只暴露只读探索五件套。serde 名固定为 "readonly"（无下划线，
+    /// 与 docs/request-audit-and-anchoring.md B2 分组名一致）。
+    #[serde(rename = "readonly")]
+    ReadOnly,
+    /// 首轮只暴露 read_file + edit（对标 dsh Minimal 工具对的编辑变体）。
+    EditorPair,
+}
+
+/// 晋升信号。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FirstRoundPromoteOn {
+    /// 默认：本轮 outcome 含任意 assistant 内容（Text 或 ToolUse）即晋升。
+    /// 等价 dsh promoteOn: either——纯文字首答不会困死在受限目录。
+    #[default]
+    Either,
+    /// 仅首次 ToolUse 晋升；模型一直不调工具则一直停留在受限目录
+    ///（dsh 的 tool-call 模式，保留作对照）。困死是该对照组的有意行为。
+    ToolCall,
 }
 
 impl Default for OrchestrationConfig {
@@ -316,6 +353,8 @@ impl Default for OrchestrationConfig {
             max_review_rounds: default_review_rounds(),
             subagent_pool: SubagentPoolConfig::default(),
             run_budget: RunBudgetConfig::default(),
+            first_round_catalog: FirstRoundCatalog::default(),
+            first_round_promote_on: FirstRoundPromoteOn::default(),
         }
     }
 }
@@ -690,6 +729,44 @@ mod tests {
             prompt_template_id: Some("implementation".to_string()),
             prompt: "Implement the delegated feature and report verification evidence.".to_string(),
         }
+    }
+
+    #[test]
+    fn first_round_catalog_and_promote_on_default_to_current_behavior() {
+        // C1：旧配置（无两个新键）读回 Full/Either 即现状行为；显式实验值
+        // snake_case 往返不报错。
+        let legacy: OrchestrationConfig = toml::from_str("").unwrap();
+        assert_eq!(legacy.first_round_catalog, FirstRoundCatalog::Full);
+        assert_eq!(legacy.first_round_promote_on, FirstRoundPromoteOn::Either);
+        let anchored: OrchestrationConfig = toml::from_str(
+            r#"
+first_round_catalog = "readonly"
+first_round_promote_on = "tool_call"
+"#,
+        )
+        .unwrap();
+        assert_eq!(anchored.first_round_catalog, FirstRoundCatalog::ReadOnly);
+        assert_eq!(
+            anchored.first_round_promote_on,
+            FirstRoundPromoteOn::ToolCall
+        );
+        assert_eq!(
+            toml::to_string(&anchored).unwrap(),
+            toml::to_string(&OrchestrationConfig {
+                first_round_catalog: FirstRoundCatalog::ReadOnly,
+                first_round_promote_on: FirstRoundPromoteOn::ToolCall,
+                ..OrchestrationConfig::default()
+            })
+            .unwrap()
+        );
+        // editor_pair 变体可解析。
+        let editor: OrchestrationConfig =
+            toml::from_str("first_round_catalog = \"editor_pair\"").unwrap();
+        assert_eq!(editor.first_round_catalog, FirstRoundCatalog::EditorPair);
+        // 非法值报配置错误（不静默回退默认）。
+        assert!(
+            toml::from_str::<OrchestrationConfig>("first_round_catalog = \"minimal\"").is_err()
+        );
     }
 
     #[test]
