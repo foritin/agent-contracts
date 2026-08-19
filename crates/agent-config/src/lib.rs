@@ -327,6 +327,10 @@ pub enum FirstRoundCatalog {
     ReadOnly,
     /// 首轮只暴露 read_file + edit（对标 dsh Minimal 工具对的编辑变体）。
     EditorPair,
+    /// 规划门：首轮起零工作工具，目录仅含 plan_ready（需配 plan_complete
+    /// 晋升信号）。剥夺跨回合持续到模型声明规划完成——恶劣环境压榨首轮
+    /// 思考的实验形态。
+    PlanGate,
 }
 
 /// 晋升信号。
@@ -340,6 +344,10 @@ pub enum FirstRoundPromoteOn {
     /// 仅首次 ToolUse 晋升；模型一直不调工具则一直停留在受限目录
     ///（dsh 的 tool-call 模式，保留作对照）。困死是该对照组的有意行为。
     ToolCall,
+    /// 仅当模型调用 plan_ready 才晋升。剥夺跨回合、跨 run 持续（会话级
+    /// 粘性），直到模型自己声明规划完成。纯文本终答自然结束 run，粘性
+    /// 保持到下一个 run 的首轮。
+    PlanComplete,
 }
 
 impl Default for OrchestrationConfig {
@@ -763,9 +771,38 @@ first_round_promote_on = "tool_call"
         let editor: OrchestrationConfig =
             toml::from_str("first_round_catalog = \"editor_pair\"").unwrap();
         assert_eq!(editor.first_round_catalog, FirstRoundCatalog::EditorPair);
+        // 规划门档位与 plan_complete 晋升信号 snake_case 往返。
+        let plan_gate: OrchestrationConfig = toml::from_str(
+            r#"
+first_round_catalog = "plan_gate"
+first_round_promote_on = "plan_complete"
+"#,
+        )
+        .unwrap();
+        assert_eq!(plan_gate.first_round_catalog, FirstRoundCatalog::PlanGate);
+        assert_eq!(
+            plan_gate.first_round_promote_on,
+            FirstRoundPromoteOn::PlanComplete
+        );
+        assert_eq!(
+            toml::to_string(&plan_gate).unwrap(),
+            toml::to_string(&OrchestrationConfig {
+                first_round_catalog: FirstRoundCatalog::PlanGate,
+                first_round_promote_on: FirstRoundPromoteOn::PlanComplete,
+                ..OrchestrationConfig::default()
+            })
+            .unwrap()
+        );
         // 非法值报配置错误（不静默回退默认）。
         assert!(
             toml::from_str::<OrchestrationConfig>("first_round_catalog = \"minimal\"").is_err()
+        );
+        assert!(
+            toml::from_str::<OrchestrationConfig>("first_round_catalog = \"planGate\"").is_err()
+        );
+        assert!(
+            toml::from_str::<OrchestrationConfig>("first_round_promote_on = \"plan_ready\"")
+                .is_err()
         );
     }
 
