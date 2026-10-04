@@ -7,6 +7,10 @@
 //! 参见文档 `04-message-types.html`、`02-session-management.html`、
 //! `01-llm-provider.html`、`03-tool-host.html`、`06-compaction.html`。
 
+// clippy 1.99 对 async_trait 宏展开生成的 boxing 方法报 double_must_use
+// （方法与其返回的 BoxFuture 同时标 must_use）——宏输出不可控，crate 级豁免。
+#![allow(clippy::double_must_use)]
+
 pub mod message;
 pub mod session;
 pub mod usage;
