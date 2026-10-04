@@ -47,6 +47,15 @@ const ERROR_BODY_READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 /// 流空闲超时终止时发出的 `StopReason::Other` 标记，agent 层据此走恢复路径。
 pub(crate) const STREAM_IDLE_TIMEOUT_REASON: &str = "stream_idle_timeout";
+/// 传输错误终止时发出的 `StopReason::Other` 前缀（A01 对齐 anthropic 解析器）。
+pub(crate) const TRANSPORT_ERROR_PREFIX: &str = "api_error: stream transport error: ";
+
+/// 判定一个 `StopReason::Other` 的 reason 字符串是否表示**流未正常完成**
+/// （空闲超时 / 传输错误），供 broker 侧完成性校验消费（A02）。已知异常集
+/// 封闭于此；未知值由调用方按 fail-open 处理（DEC-3）。
+pub fn is_abnormal_stop(reason: &str) -> bool {
+    reason == STREAM_IDLE_TIMEOUT_REASON || reason.starts_with(TRANSPORT_ERROR_PREFIX)
+}
 
 // ── 悬空工具调用对的占位结果（https://github.com/foritin/r-code/blob/main/docs/archive/deepseek-prefix-cache.md §5 P1-F）
 //
@@ -1262,10 +1271,19 @@ fn parse_openai_sse(
                     }
                     return Vec::new();
                 }
-                // 底层传输错误：保持既有行为（静默终止，不补 Stop），与
-                // watchdog 掐断的显式标记区分。
+                // 底层传输错误：与 anthropic 解析器对齐（A01）——发显式
+                // api_error Stop 而非静默终止，agent 层才能区分"流未完成"
+                // 与正常结束并做冻结请求重放（deepseek-prefix-cache §5 P1-E）。
                 Err(SseChunkError::Transport(error)) => {
-                    tracing::debug!(error = %error, "provider stream transport error");
+                    if !stopped {
+                        stopped = true;
+                        tracing::debug!(error = %error, "provider stream transport error");
+                        return vec![StreamEvent::Stop {
+                            reason: StopReason::Other(format!(
+                                "api_error: stream transport error: {error}"
+                            )),
+                        }];
+                    }
                     return Vec::new();
                 }
             };
@@ -2742,5 +2760,75 @@ mod sse_byte_boundary_tests {
             })
             .collect();
         assert_eq!(text, payload);
+    }
+
+    // ── A01：传输错误显式 Stop + is_abnormal_stop ──────────────────
+
+    async fn refused_reqwest_error() -> reqwest::Error {
+        reqwest::get("http://127.0.0.1:1/").await.unwrap_err()
+    }
+
+    fn stop_reasons(events: &[StreamEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Stop { reason } => Some(format!("{reason:?}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a01_is_abnormal_stop_classifies_known_markers() {
+        assert!(is_abnormal_stop(STREAM_IDLE_TIMEOUT_REASON));
+        assert!(is_abnormal_stop(
+            "api_error: stream transport error: connection reset"
+        ));
+        assert!(!is_abnormal_stop("end_turn"));
+        assert!(!is_abnormal_stop("some future marker"));
+        assert!(!is_abnormal_stop(""));
+    }
+
+    #[tokio::test]
+    async fn a01_openai_normal_finish_emits_stop() {
+        let data = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+        let stream = futures::stream::iter(vec![Ok::<_, SseChunkError>(
+            bytes::Bytes::copy_from_slice(data.as_bytes()),
+        )]);
+        let events: Vec<StreamEvent> = parse_openai_sse(stream).collect().await;
+        let stops = stop_reasons(&events);
+        assert_eq!(stops, vec![format!("{:?}", StopReason::EndTurn)]);
+    }
+
+    #[tokio::test]
+    async fn a01_openai_done_fallback_emits_stop() {
+        let stream = futures::stream::iter(vec![Ok::<_, SseChunkError>(
+            bytes::Bytes::copy_from_slice("data: [DONE]\n\n".as_bytes()),
+        )]);
+        let events: Vec<StreamEvent> = parse_openai_sse(stream).collect().await;
+        let stops = stop_reasons(&events);
+        assert_eq!(stops.len(), 1, "no-finish_reason [DONE] must still Stop");
+    }
+
+    #[tokio::test]
+    async fn a01_transport_drop_emits_api_error_stop_once() {
+        let chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+        let stream = futures::stream::iter(vec![
+            Ok::<_, SseChunkError>(bytes::Bytes::copy_from_slice(chunk.as_bytes())),
+            Err(SseChunkError::Transport(refused_reqwest_error().await)),
+            Err(SseChunkError::Transport(refused_reqwest_error().await)),
+        ]);
+        let events: Vec<StreamEvent> = parse_openai_sse(stream).collect().await;
+        let markers: Vec<String> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Stop {
+                    reason: StopReason::Other(other),
+                } => Some(other.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(markers.len(), 1, "exactly one api_error Stop");
+        assert!(markers[0].starts_with(TRANSPORT_ERROR_PREFIX));
     }
 }

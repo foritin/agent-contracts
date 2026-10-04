@@ -21,6 +21,7 @@ pub use anthropic::AnthropicProvider;
 pub use deepseek::DeepSeekProvider;
 pub use dialect::{dialect_for, DialectPort, WireDialect};
 pub use mock::{MockProvider, RecordedTurn};
+pub use openai::is_abnormal_stop;
 pub use openai::OpenAiProvider;
 pub use responses::{ReasoningMode, ResponsesProvider};
 

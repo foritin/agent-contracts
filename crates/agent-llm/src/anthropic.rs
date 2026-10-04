@@ -872,9 +872,12 @@ fn parse_sse_stream(
                 Err(error) => {
                     let error = sanitize_http_err(&error, &state.api_key);
                     tracing::debug!(error = %error, "provider stream transport error");
+                    // 复用 openai 模块的前缀常量（A01 单一事实源），保证
+                    // is_abnormal_stop 对三方言的判定一致。
                     return vec![StreamEvent::Stop {
                         reason: StopReason::Other(format!(
-                            "api_error: stream transport error: {error}"
+                            "{}{error}",
+                            crate::openai::TRANSPORT_ERROR_PREFIX
                         )),
                     }];
                 }

@@ -986,7 +986,19 @@ fn parse_responses_sse(
                     }
                     return Vec::new();
                 }
-                Err(crate::openai::SseChunkError::Transport(_)) => return Vec::new(),
+                Err(crate::openai::SseChunkError::Transport(error)) => {
+                    // 对齐 anthropic/openai 解析器（A01）：传输错误发显式
+                    // api_error Stop，杜绝静默截断。
+                    if !state.stopped {
+                        state.stopped = true;
+                        return vec![StreamEvent::Stop {
+                            reason: StopReason::Other(format!(
+                                "api_error: stream transport error: {error}"
+                            )),
+                        }];
+                    }
+                    return Vec::new();
+                }
             };
             buffer.extend_from_slice(&chunk);
             let mut events = Vec::new();
