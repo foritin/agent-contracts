@@ -3,6 +3,9 @@
 //! 参见 `05-mcp-client.html`。封装 MCP 协议（JSON-RPC 2.0），支持 stdio 子进程
 //! 与 Streamable HTTP 两种传输，并通过 `McpToolHost` 聚合为 `ToolHost`。
 
+// clippy 1.99 对 async_trait 展开的 boxing 方法报 double_must_use——宏输出不可控，crate 级豁免。
+#![allow(clippy::double_must_use)]
+
 pub mod config;
 pub mod error;
 pub mod host;
